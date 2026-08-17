@@ -2,14 +2,18 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import * as schema from './schema';
 
-const isLocal = (process.env.DATABASE_URL || '').includes('localhost');
+const dbUrl = process.env.DATABASE_URL || '';
+// Internal Render DB URL has no subdomain dots before the DB path
+// External URL contains .render.com or .postgres.render.com
+// Local URL contains localhost
+const needsSsl = dbUrl.includes('.render.com') || dbUrl.includes('.postgres.');
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: isLocal ? false : { rejectUnauthorized: false },
+  connectionString: dbUrl,
+  ssl: needsSsl ? { rejectUnauthorized: false } : false,
   max: 5,
-  idleTimeoutMillis: 10_000,   // close idle connections after 10s
-  connectionTimeoutMillis: 8_000,
+  idleTimeoutMillis: 15_000,
+  connectionTimeoutMillis: 10_000,
   allowExitOnIdle: false,
 });
 
