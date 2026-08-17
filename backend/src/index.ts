@@ -29,17 +29,28 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 });
 
 async function start() {
-  try {
-    await migrate();
-    console.log('✅ Database migrated');
-    await seedResources();
-    app.listen(PORT, () => {
-      console.log(`🚀 Backend running on port ${PORT}`);
-    });
-  } catch (e) {
-    console.error('Failed to start:', e);
-    process.exit(1);
-  }
+  // Start HTTP server immediately so Render health check passes
+  app.listen(PORT, () => {
+    console.log(`🚀 Backend running on port ${PORT}`);
+  });
+
+  // DB setup runs after server is up — retries on failure
+  const setupDb = async (retries = 5): Promise<void> => {
+    try {
+      await migrate();
+      console.log('✅ Database migrated');
+      await seedResources();
+      console.log('✅ Ready');
+    } catch (e: any) {
+      if (retries > 0) {
+        console.warn(`⚠️  DB not ready, retrying in 5s (${retries} left):`, e.message);
+        await new Promise(r => setTimeout(r, 5000));
+        return setupDb(retries - 1);
+      }
+      console.error('❌ DB setup failed:', e.message);
+    }
+  };
+  setupDb();
 }
 
 start();
