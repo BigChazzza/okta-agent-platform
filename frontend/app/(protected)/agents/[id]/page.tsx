@@ -75,7 +75,7 @@ export default async function AgentDetailPage({ params }: { params: { id: string
           <span className="w-1.5 h-1.5 rounded-full bg-purple-500" />
           Connected Resources
         </h2>
-        <ResourcePicker agentId={agent.id} assignedResources={agent.resources || []} />
+        <ResourcePicker agentId={agent.id} />
       </section>
 
       <section className="bg-[#111827] border border-red-500/15 rounded-xl p-5">
