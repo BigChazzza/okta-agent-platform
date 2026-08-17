@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: okta-agent-backend
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: node dist/index.js
+    rootDir: backend
+    plan: free
+    region: oregon
+    envVars:
+      - key: NODE_VERSION
+        value: 20
