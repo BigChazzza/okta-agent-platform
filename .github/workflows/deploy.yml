@@ -1,0 +1,39 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  deploy-frontend:
+    name: Deploy Frontend → Vercel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Deploy to Vercel
+        working-directory: frontend
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            vercel deploy --prod --yes --token ${{ secrets.VERCEL_TOKEN }}
+          else
+            vercel deploy --yes --token ${{ secrets.VERCEL_TOKEN }}
+          fi
+
+  deploy-backend:
+    name: Deploy Backend → Render
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            -d '{"clearCache": false}'
+          echo "✅ Render deploy triggered"
