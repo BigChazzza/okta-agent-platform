@@ -1,13 +1,12 @@
+// Okta Management API + AI Agents (Secures AI) API service
+
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
 async function getAccessToken(): Promise<string> {
-  if (tokenCache && Date.now() < tokenCache.expiresAt - 60_000) {
-    return tokenCache.token;
-  }
+  if (tokenCache && Date.now() < tokenCache.expiresAt - 60_000) return tokenCache.token;
   const orgUrl = process.env.OKTA_ORG_URL!;
   const clientId = process.env.OKTA_M2M_CLIENT_ID!;
   const clientSecret = process.env.OKTA_M2M_CLIENT_SECRET!;
-
   const res = await fetch(`${orgUrl}/oauth2/v1/token`, {
     method: 'POST',
     headers: {
@@ -16,15 +15,10 @@ async function getAccessToken(): Promise<string> {
     },
     body: new URLSearchParams({
       grant_type: 'client_credentials',
-      scope: 'okta.users.read okta.agents.manage okta.apps.manage',
+      scope: 'okta.users.read okta.apps.manage okta.groups.read',
     }),
   });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Okta token error: ${err}`);
-  }
-
+  if (!res.ok) throw new Error(`Okta token error: ${await res.text()}`);
   const data = await res.json() as { access_token: string; expires_in: number };
   tokenCache = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
   return tokenCache.token;
@@ -32,41 +26,28 @@ async function getAccessToken(): Promise<string> {
 
 async function oktaFetch(path: string, init: RequestInit = {}) {
   const token = await getAccessToken();
-  const orgUrl = process.env.OKTA_ORG_URL!;
-  const res = await fetch(`${orgUrl}${path}`, {
+  return fetch(`${process.env.OKTA_ORG_URL}${path}`, {
     ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      ...init.headers,
-    },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json', ...init.headers },
   });
-  return res;
 }
 
+// ── Management API ─────────────────────────────────────────────────────────────
+
 export interface OktaUser {
-  id: string;
-  login: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  displayName: string;
-  status: string;
+  id: string; login: string; email: string;
+  firstName: string; lastName: string; displayName: string; status: string;
 }
 
 export async function listUsers(query?: string, limit = 25): Promise<OktaUser[]> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (query) params.set('q', query);
   const res = await oktaFetch(`/api/v1/users?${params}`);
-  if (!res.ok) throw new Error(`listUsers failed: ${res.status}`);
+  if (!res.ok) throw new Error(`listUsers ${res.status}`);
   const users = await res.json() as any[];
   return users.map((u) => ({
-    id: u.id,
-    login: u.profile.login,
-    email: u.profile.email,
-    firstName: u.profile.firstName,
-    lastName: u.profile.lastName,
+    id: u.id, login: u.profile.login, email: u.profile.email,
+    firstName: u.profile.firstName, lastName: u.profile.lastName,
     displayName: `${u.profile.firstName} ${u.profile.lastName}`.trim() || u.profile.login,
     status: u.status,
   }));
@@ -74,50 +55,103 @@ export async function listUsers(query?: string, limit = 25): Promise<OktaUser[]>
 
 export async function getUser(userId: string): Promise<OktaUser> {
   const res = await oktaFetch(`/api/v1/users/${userId}`);
-  if (!res.ok) throw new Error(`getUser failed: ${res.status}`);
+  if (!res.ok) throw new Error(`getUser ${res.status}`);
   const u = await res.json() as any;
   return {
-    id: u.id,
-    login: u.profile.login,
-    email: u.profile.email,
-    firstName: u.profile.firstName,
-    lastName: u.profile.lastName,
+    id: u.id, login: u.profile.login, email: u.profile.email,
+    firstName: u.profile.firstName, lastName: u.profile.lastName,
     displayName: `${u.profile.firstName} ${u.profile.lastName}`.trim() || u.profile.login,
     status: u.status,
   };
 }
 
-export async function createAgent(name: string, description: string): Promise<{ id: string; name: string; status: string }> {
-  const res = await oktaFetch('/api/v1/agents', {
+// ── AI Agents API (Secures AI / Workload Principals) ──────────────────────────
+// Base path: /workload-principals/api/v1/ai-agents
+// Auth: SSWS API token (Management API token)
+// POST returns 202 + Location header pointing to async operation
+// Poll operation until COMPLETED, then GET the agent
+
+const SSWS_TOKEN = process.env.OKTA_API_TOKEN || '';
+const ORG_URL = () => process.env.OKTA_ORG_URL!;
+
+async function aiAgentsFetch(path: string, init: RequestInit = {}) {
+  // AI Agents API uses SSWS token, not OAuth
+  const token = process.env.OKTA_API_TOKEN!;
+  return fetch(`${ORG_URL()}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `SSWS ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...init.headers,
+    },
+  });
+}
+
+async function pollOperation(opUrl: string, maxAttempts = 10): Promise<string> {
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    const res = await fetch(opUrl, {
+      headers: { Authorization: `SSWS ${process.env.OKTA_API_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!res.ok) throw new Error(`Operation poll failed: ${res.status}`);
+    const op = await res.json() as any;
+    if (op.status === 'COMPLETED' || op.status === 'SUCCEEDED') {
+      return op.resource?.id;
+    }
+    if (op.status === 'FAILED' || op.status === 'ERROR') {
+      throw new Error(`Agent operation failed: ${JSON.stringify(op)}`);
+    }
+  }
+  throw new Error('Agent creation timed out');
+}
+
+export interface OktaAIAgent {
+  id: string; platform: string; status: string;
+  profile: { name: string; description?: string };
+  created?: string; lastUpdated?: string;
+}
+
+export async function listAIAgents(limit = 50): Promise<OktaAIAgent[]> {
+  const res = await aiAgentsFetch(`/workload-principals/api/v1/ai-agents?limit=${limit}&orderBy=createdDate&sortOrder=desc`);
+  if (!res.ok) throw new Error(`listAIAgents ${res.status}: ${await res.text()}`);
+  const data = await res.json() as { data: OktaAIAgent[] };
+  return data.data || [];
+}
+
+export async function createAIAgent(name: string, description?: string): Promise<OktaAIAgent> {
+  const body: any = { profile: { name } };
+  if (description) body.profile.description = description;
+
+  const res = await aiAgentsFetch('/workload-principals/api/v1/ai-agents', {
     method: 'POST',
-    body: JSON.stringify({ name, description, type: 'CUSTOM' }),
+    body: JSON.stringify(body),
   });
 
-  if (res.status === 404 || res.status === 400) {
-    // O4AA not enabled or endpoint not yet available — return mock for demo purposes
-    console.warn('⚠️  Okta /api/v1/agents returned', res.status, '— using mock agent ID (O4AA may not be enabled on this tenant)');
-    return { id: `mock-${Date.now()}`, name, status: 'ACTIVE' };
+  if (res.status === 202) {
+    // Async operation — poll until complete
+    const opUrl = res.headers.get('Location');
+    if (!opUrl) throw new Error('No Location header in 202 response');
+    const agentId = await pollOperation(opUrl);
+    return getAIAgent(agentId);
   }
 
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`createAgent failed: ${res.status} — ${err}`);
+    const err = await res.json() as any;
+    throw new Error(err.errorSummary || `createAIAgent ${res.status}`);
   }
-  const agent = await res.json() as any;
-  return { id: agent.id, name: agent.name || name, status: agent.status || 'ACTIVE' };
+
+  // Synchronous 201 (in case API changes)
+  return res.json() as Promise<OktaAIAgent>;
 }
 
-export async function getAgent(agentId: string) {
-  if (agentId.startsWith('mock-')) return { id: agentId, status: 'ACTIVE' };
-  const res = await oktaFetch(`/api/v1/agents/${agentId}`);
-  if (!res.ok) return null;
-  return res.json();
+export async function getAIAgent(agentId: string): Promise<OktaAIAgent> {
+  const res = await aiAgentsFetch(`/workload-principals/api/v1/ai-agents/${agentId}`);
+  if (!res.ok) throw new Error(`getAIAgent ${res.status}`);
+  return res.json() as Promise<OktaAIAgent>;
 }
 
-export async function deleteAgent(agentId: string): Promise<void> {
-  if (agentId.startsWith('mock-')) return;
-  const res = await oktaFetch(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
-  if (res.status !== 204 && !res.ok) {
-    console.warn('deleteAgent returned', res.status);
-  }
+export async function deleteAIAgent(agentId: string): Promise<void> {
+  const res = await aiAgentsFetch(`/workload-principals/api/v1/ai-agents/${agentId}`, { method: 'DELETE' });
+  if (res.status !== 204 && !res.ok) console.warn(`deleteAIAgent returned ${res.status}`);
 }
