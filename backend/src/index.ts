@@ -15,6 +15,14 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Keep-alive: ping DB every 8 minutes to prevent idle connection drop
+import { pool as pgPool } from './db/client';
+setInterval(async () => {
+  try { await pgPool.query('SELECT 1'); } catch (e: any) {
+    console.warn('Keep-alive ping failed (will retry on next request):', e.message);
+  }
+}, 8 * 60 * 1000);
+
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });

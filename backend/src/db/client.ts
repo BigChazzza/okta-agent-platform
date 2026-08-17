@@ -3,12 +3,41 @@ import { Pool } from 'pg';
 import * as schema from './schema';
 
 const isLocal = (process.env.DATABASE_URL || '').includes('localhost');
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: isLocal ? false : { rejectUnauthorized: false },
+  max: 5,
+  idleTimeoutMillis: 10_000,   // close idle connections after 10s
+  connectionTimeoutMillis: 8_000,
+  allowExitOnIdle: false,
 });
 
+// Reconnect on unexpected termination
+pool.on('error', (err) => {
+  console.error('Postgres pool error — pool will reconnect on next query:', err.message);
+});
+
+export { pool };
 export const db = drizzle(pool, { schema });
+
+// Retry a DB operation on "Connection terminated" errors
+export async function withRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const isConnErr = err.message?.includes('terminated') || err.message?.includes('ECONNRESET') || err.code === '57P01';
+      if (isConnErr && i < retries) {
+        console.warn(`DB connection error, retrying (${i + 1}/${retries})…`);
+        await new Promise(r => setTimeout(r, 500 * (i + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Max DB retries exceeded');
+}
 
 export async function migrate() {
   await pool.query(`
