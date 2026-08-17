@@ -138,6 +138,11 @@ export async function createAIAgent(name: string, description?: string): Promise
 
   if (!res.ok) {
     const err = await res.json() as any;
+    const causes = err.errorCauses || [];
+    const nameConflict = causes.some((c: any) => c.errorSummary?.includes('already exists'));
+    if (nameConflict) {
+      throw new Error(`An agent named "${name}" already exists in Okta. Please choose a different name.`);
+    }
     throw new Error(err.errorSummary || `createAIAgent ${res.status}`);
   }
 
