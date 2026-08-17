@@ -76,13 +76,17 @@ export async function migrate() {
 
 const DEFAULT_RESOURCES = [
   { name: 'AWS Bedrock', type: 'cloud_ai', description: 'Amazon Bedrock foundation models and agent runtime' },
+  { name: 'Google Vertex AI', type: 'cloud_ai', description: 'Google Vertex AI — Gemini and other Google AI models' },
+  { name: 'Azure OpenAI', type: 'cloud_ai', description: 'Azure OpenAI Service — GPT-4 and other models via Azure' },
   { name: 'Slack MCP Server', type: 'mcp_server', description: 'Slack MCP connector for agent messaging and notifications' },
   { name: 'GitHub MCP Server', type: 'mcp_server', description: 'GitHub MCP connector for code operations and repository access' },
+  { name: 'Okta MCP Adapter', type: 'mcp_server', description: 'Okta MCP Adapter — connect AI agents to Okta-secured tools' },
   { name: 'Salesforce', type: 'saas_app', description: 'Salesforce CRM — contacts, accounts, opportunities' },
   { name: 'Jira', type: 'saas_app', description: 'Atlassian Jira project management and issue tracking' },
   { name: 'Google Workspace', type: 'saas_app', description: 'Google Workspace — Gmail, Drive, Calendar, Docs' },
-  { name: 'OpenAI API', type: 'api', description: 'OpenAI GPT-4 and other model APIs' },
   { name: 'Confluence', type: 'saas_app', description: 'Atlassian Confluence knowledge base and documentation' },
+  { name: 'OpenAI API', type: 'api', description: 'OpenAI GPT-4 and other model APIs' },
+  { name: 'Anthropic API', type: 'api', description: 'Anthropic Claude API for AI agent capabilities' },
 ];
 
 export async function seedResources() {

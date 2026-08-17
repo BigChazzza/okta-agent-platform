@@ -1,11 +1,12 @@
 import { apiFetch, Resource } from '@/lib/api';
-import { Puzzle, Server, Cloud, Globe, Database } from 'lucide-react';
+import { Puzzle, Server, Cloud, Globe, Database, Shield } from 'lucide-react';
 
 const typeConfig: Record<string, { label: string; icon: any; colour: string }> = {
-  mcp_server: { label: 'MCP Server',  icon: Server,   colour: '#8b5cf6' },
-  cloud_ai:   { label: 'Cloud AI',    icon: Cloud,    colour: '#10b981' },
-  saas_app:   { label: 'SaaS App',    icon: Globe,    colour: '#1662dd' },
-  api:        { label: 'API',         icon: Database,  colour: '#f59e0b' },
+  mcp_server:  { label: 'MCP Server',          icon: Server,   colour: '#8b5cf6' },
+  cloud_ai:    { label: 'Cloud AI',             icon: Cloud,    colour: '#10b981' },
+  saas_app:    { label: 'SaaS App',             icon: Globe,    colour: '#1662dd' },
+  api:         { label: 'API',                  icon: Database, colour: '#f59e0b' },
+  auth_server: { label: 'Okta Auth Server',     icon: Shield,   colour: '#60a5fa' },
 };
 
 export default async function ResourcesPage() {

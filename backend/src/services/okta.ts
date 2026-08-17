@@ -65,6 +65,21 @@ export async function getUser(userId: string): Promise<OktaUser> {
   };
 }
 
+// ── Authorization Servers ─────────────────────────────────────────────────────
+
+export interface OktaAuthServer {
+  id: string; name: string; description?: string; issuer?: string; status?: string;
+}
+
+export async function listAuthorizationServers(): Promise<OktaAuthServer[]> {
+  const res = await oktaFetch('/api/v1/authorizationServers?limit=50');
+  if (!res.ok) return [];
+  const data = await res.json() as any[];
+  return data.map((s) => ({
+    id: s.id, name: s.name, description: s.description, issuer: s.issuer, status: s.status,
+  }));
+}
+
 // ── AI Agents API (Secures AI / Workload Principals) ──────────────────────────
 // Base path: /workload-principals/api/v1/ai-agents
 // Auth: SSWS API token (Management API token)
