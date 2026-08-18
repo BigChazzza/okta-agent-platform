@@ -52,9 +52,9 @@ export async function getUser(userId: string): Promise<OktaUser> {
 // ── AI Agents (Secures AI / Workload Principals) ───────────────────────────────
 
 export interface OktaAIAgent {
-  id: string; platform: string; status: string;
+  id: string; platform: string; status: string; appId?: string;
   profile: { name: string; description?: string };
-  created?: string; lastUpdated?: string;
+  created?: string; lastUpdated?: string; _links?: any;
 }
 
 async function pollOperation(opUrl: string, maxAttempts = 15): Promise<string> {
@@ -112,6 +112,80 @@ export async function getAIAgent(agentId: string): Promise<OktaAIAgent> {
 export async function deleteAIAgent(agentId: string): Promise<void> {
   const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}`, { method: 'DELETE' });
   if (res.status !== 204 && !res.ok) console.warn(`deleteAIAgent returned ${res.status}`);
+}
+
+export async function activateAIAgent(agentId: string): Promise<any> {
+  const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/lifecycle/activate`, { method: 'POST' });
+  if (res.status === 202) {
+    // Async — poll for completion
+    const opUrl = res.headers.get('Location');
+    if (opUrl) {
+      try { await pollOperation(opUrl, 20); } catch {}
+    }
+    // Re-fetch agent to get updated status + appId
+    await new Promise(r => setTimeout(r, 2000));
+    return getAIAgent(agentId);
+  }
+  if (!res.ok) {
+    const err = await res.json() as any;
+    throw new Error(err.errorSummary || `activateAgent ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deactivateAIAgent(agentId: string): Promise<void> {
+  const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/lifecycle/deactivate`, { method: 'POST' });
+  if (!res.ok && res.status !== 202 && res.status !== 204) {
+    const err = await res.json() as any;
+    throw new Error(err.errorSummary || `deactivateAgent ${res.status}`);
+  }
+}
+
+// ── Agent Credentials (backing app) ──────────────────────────────────────────
+
+export interface AgentCredentials {
+  appId: string; clientId: string; authMethod: string;
+  clientSecret?: string; hasSecret?: boolean;
+}
+
+export async function getAgentCredentials(appId: string): Promise<AgentCredentials> {
+  const res = await sswsFetch(`/api/v1/apps/${appId}`);
+  if (!res.ok) throw new Error(`getAgentCredentials ${res.status}`);
+  const app = await res.json() as any;
+  const creds = app.credentials?.oauthClient || {};
+  return {
+    appId,
+    clientId: creds.client_id || appId,
+    authMethod: creds.token_endpoint_auth_method || 'client_secret_basic',
+    hasSecret: !!creds.client_secret,
+  };
+}
+
+export async function setAgentAuthMethod(appId: string, authMethod: string): Promise<AgentCredentials> {
+  // GET current app config then PUT it back with updated auth method
+  const getRes = await sswsFetch(`/api/v1/apps/${appId}`);
+  if (!getRes.ok) throw new Error(`getApp ${getRes.status}`);
+  const app = await getRes.json() as any;
+
+  app.credentials = app.credentials || {};
+  app.credentials.oauthClient = app.credentials.oauthClient || {};
+  app.credentials.oauthClient.token_endpoint_auth_method = authMethod;
+
+  const putRes = await sswsFetch(`/api/v1/apps/${appId}`, {
+    method: 'PUT', body: JSON.stringify(app),
+  });
+  if (!putRes.ok) {
+    const err = await putRes.json() as any;
+    throw new Error(err.errorSummary || `setAuthMethod ${putRes.status}`);
+  }
+  const updated = await putRes.json() as any;
+  const creds = updated.credentials?.oauthClient || {};
+  return {
+    appId,
+    clientId: creds.client_id || appId,
+    authMethod: creds.token_endpoint_auth_method,
+    hasSecret: authMethod !== 'none' && authMethod !== 'private_key_jwt',
+  };
 }
 
 // ── Potential Connections (what can be connected to an agent) ─────────────────
