@@ -29,7 +29,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/api/agents', agentsRouter);
-app.use('/api/agents', connectionsRouter);  // nested: /api/agents/:id/connections
+app.use('/api/agents', connectionsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/resources', resourcesRouter);
 

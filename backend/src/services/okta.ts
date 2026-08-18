@@ -188,6 +188,46 @@ export async function setAgentAuthMethod(appId: string, authMethod: string): Pro
   };
 }
 
+// ── IGA Resource Owners ───────────────────────────────────────────────────────
+// Governance API to assign owners in Okta's AI Agents "Owners" tab
+
+export function agentOrnFromLinks(links: any): string {
+  // Extract agent ORN from the delegationLinks href filter param
+  const href = links?.delegationLinks?.href || '';
+  const match = href.match(/to\.resourceOrn\s+eq\s+"([^"]+)"/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+export async function setAgentOwner(agentId: string, userId: string): Promise<void> {
+  // 1. Get agent ORN
+  const agent = await getAIAgent(agentId);
+  const agentOrn = agentOrnFromLinks(agent._links);
+  if (!agentOrn) throw new Error('Could not derive agent ORN');
+
+  // 2. Build user ORN — format: orn:{env}:directory:{orgId}:users:{userId}
+  // Extract orgId from the agentOrn
+  const parts = agentOrn.split(':'); // orn:oktapreview:directory:{orgId}:workload-principals:...
+  const env = parts[1]; // e.g. 'oktapreview'
+  const orgId = parts[3];
+  const userOrn = `orn:${env}:directory:${orgId}:users:${userId}`;
+
+  // 3. PATCH governance API to add owner
+  const res = await sswsFetch('/governance/api/v1/resource-owners', {
+    method: 'PATCH',
+    body: JSON.stringify({
+      resourceOrn: agentOrn,
+      data: [{ op: 'ADD', path: '/principalOrn', value: userOrn }],
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json() as any;
+    // If ADD is not supported, log and continue — owner is stored in local DB
+    const msg = err.errorSummary || JSON.stringify(err.errorCauses || []);
+    console.warn(`IGA owner assignment returned ${res.status}: ${msg} — owner stored locally only`);
+  }
+}
+
 // ── Potential Connections (what can be connected to an agent) ─────────────────
 
 export const CONNECTION_TYPES = [

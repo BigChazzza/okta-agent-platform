@@ -104,10 +104,17 @@ router.put('/:id/owner', async (req: Request, res: Response) => {
   if (!userId) return res.status(400).json({ error: 'userId is required' });
   try {
     const user = await okta.getUser(userId);
+    // 1. Store in local DB
     const [updated] = await db.update(agents)
       .set({ ownerId: user.id, ownerName: user.displayName, ownerEmail: user.email })
       .where(eq(agents.id, req.params.id)).returning();
     if (!updated) return res.status(404).json({ error: 'Agent not found' });
+    // 2. Also assign in Okta IGA (best effort — logs warning if not supported)
+    if (updated.oktaAgentId) {
+      okta.setAgentOwner(updated.oktaAgentId, userId).catch(e =>
+        console.warn('IGA owner assignment failed:', e.message)
+      );
+    }
     res.json(updated);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
