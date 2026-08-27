@@ -107,13 +107,14 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     let oktaData: any = null;
     let credentials: any = null;
+    let adminConsoleUrl: string | undefined;
     if (agent.oktaAgentId) {
       try {
         oktaData = await okta.getAIAgent(agent.oktaAgentId);
-        // If active and has appId, get credential config
         if (oktaData?.appId) {
           credentials = await okta.getAgentCredentials(oktaData.appId);
         }
+        adminConsoleUrl = await okta.getAgentAdminUrl(agent.oktaAgentId);
       } catch {}
     }
 
@@ -122,6 +123,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       resources: linked.map(l => l.resource),
       okta: oktaData,
       credentials,
+      adminConsoleUrl,
     });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
