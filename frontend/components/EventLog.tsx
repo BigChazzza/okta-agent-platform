@@ -105,8 +105,8 @@ export default function EventLog() {
         </div>
         <div className="flex items-center gap-1.5">
           {connected
-            ? <Wifi className="w-3 h-3 text-emerald-400" title="Connected" />
-            : <WifiOff className="w-3 h-3 text-red-400" title="Disconnected" />
+            ? <span title="Connected"><Wifi className="w-3 h-3 text-emerald-400" /></span>
+            : <span title="Disconnected"><WifiOff className="w-3 h-3 text-red-400" /></span>
           }
           <button onClick={connect} title="Reconnect" className="text-slate-600 hover:text-slate-300 p-0.5">
             <RotateCcw className="w-3 h-3" />
