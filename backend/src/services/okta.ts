@@ -1,11 +1,40 @@
 // Okta Management API + AI Agents (Secures AI / Workload Principals) API
 // All calls use SSWS API token — simpler, no OAuth2 M2M needed.
 
+import { eventBus, nextId, labelForPath } from './eventBus';
+
 const ORG = () => process.env.OKTA_ORG_URL!;
 const TOKEN = () => process.env.OKTA_API_TOKEN!;
 
 async function sswsFetch(path: string, init: RequestInit = {}) {
-  return fetch(`${ORG()}${path}`, {
+  const method = (init.method || 'GET').toUpperCase();
+  const startMs = Date.now();
+  const eventId = nextId();
+
+  // Parse request body for the event (mask sensitive fields)
+  let requestBody: any;
+  if (init.body && typeof init.body === 'string') {
+    try {
+      const parsed = JSON.parse(init.body);
+      // Mask secret values
+      requestBody = JSON.parse(JSON.stringify(parsed, (k, v) =>
+        ['client_secret', 'secret', 'password', 'token', 'Authorization'].includes(k)
+          ? '***' : v
+      ));
+    } catch { requestBody = '[binary]'; }
+  }
+
+  // Emit request-start event
+  eventBus.emit('okta:call', {
+    id: eventId,
+    ts: new Date().toISOString(),
+    method,
+    path,
+    label: labelForPath(method, path),
+    requestBody,
+  });
+
+  const res = await fetch(`${ORG()}${path}`, {
     ...init,
     headers: {
       Authorization: `SSWS ${TOKEN()}`,
@@ -14,6 +43,20 @@ async function sswsFetch(path: string, init: RequestInit = {}) {
       ...(init.headers || {}),
     },
   });
+
+  // Emit completion with status + duration
+  eventBus.emit('okta:response', {
+    id: eventId,
+    ts: new Date().toISOString(),
+    method,
+    path,
+    label: labelForPath(method, path),
+    requestBody,
+    status: res.status,
+    durationMs: Date.now() - startMs,
+  });
+
+  return res;
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────

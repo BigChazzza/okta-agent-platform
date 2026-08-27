@@ -5,6 +5,7 @@ import agentsRouter from './routes/agents';
 import usersRouter from './routes/users';
 import resourcesRouter from './routes/resources';
 import connectionsRouter from './routes/connections';
+import { eventBus, OktaApiEvent } from './services/eventBus';
 import { migrate, seedResources } from './db/client';
 
 const app = express();
@@ -26,6 +27,38 @@ setInterval(async () => {
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ── SSE event stream — broadcasts every Okta API call in real-time ──────────
+const sseClients = new Map<number, import('express').Response>();
+let clientCounter = 0;
+
+app.get('/api/events', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'Access-Control-Allow-Origin': process.env.FRONTEND_URL || 'http://localhost:3000',
+    'Access-Control-Allow-Credentials': 'true',
+  });
+  res.write('data: {"type":"connected"}\n\n');
+
+  const id = ++clientCounter;
+  sseClients.set(id, res);
+
+  const handler = (event: OktaApiEvent) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+  eventBus.on('okta:response', handler);
+
+  // Keep-alive ping every 25s
+  const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
+
+  req.on('close', () => {
+    clearInterval(ping);
+    eventBus.off('okta:response', handler);
+    sseClients.delete(id);
+  });
 });
 
 app.use('/api/agents', agentsRouter);
