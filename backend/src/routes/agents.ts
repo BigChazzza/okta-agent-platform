@@ -139,13 +139,12 @@ router.put('/:id/owner', async (req: Request, res: Response) => {
       .set({ ownerId: user.id, ownerName: user.displayName, ownerEmail: user.email })
       .where(eq(agents.id, req.params.id)).returning();
     if (!updated) return res.status(404).json({ error: 'Agent not found' });
-    // 2. Also assign in Okta IGA (best effort — logs warning if not supported)
+    // Build admin console link for the user to also set in Okta
+    let adminConsoleUrl: string | undefined;
     if (updated.oktaAgentId) {
-      okta.setAgentOwner(updated.oktaAgentId, userId).catch(e =>
-        console.warn('IGA owner assignment failed:', e.message)
-      );
+      try { adminConsoleUrl = await okta.getAgentAdminUrl(updated.oktaAgentId); } catch {}
     }
-    res.json(updated);
+    res.json({ ...updated, adminConsoleUrl, ownerNote: 'Owner saved in app. To register in Okta, set via Admin Console → AI Agents → Owners tab.' });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

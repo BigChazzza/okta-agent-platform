@@ -17,6 +17,7 @@ export default function UserPicker({ agentId, currentOwner: initialOwner, onAssi
   const [users, setUsers] = useState<OktaUser[]>([]);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState('');
+  const [adminUrl, setAdminUrl] = useState('');
   const [error, setError] = useState('');
   const [owner, setOwner] = useState(initialOwner);
   const timer = useRef<ReturnType<typeof setTimeout>>();
@@ -52,12 +53,14 @@ export default function UserPicker({ agentId, currentOwner: initialOwner, onAssi
         setError(d.error || 'Failed to assign owner');
         return;
       }
+      const data = await res.json();
       setOwner({ id: user.id, name: user.displayName, email: user.email });
       setOpen(false);
       setQuery('');
       setSuccess(`Owner set to ${user.displayName}`);
+      if (data.adminConsoleUrl) setAdminUrl(data.adminConsoleUrl);
       onAssigned?.(user);
-      setTimeout(() => setSuccess(''), 3000);
+      setTimeout(() => setSuccess(''), 8000);
     } catch (e: any) {
       setError(e.message || 'Failed to assign owner');
     }
@@ -90,8 +93,24 @@ export default function UserPicker({ agentId, currentOwner: initialOwner, onAssi
       </div>
 
       {success && (
-        <div className="text-xs text-emerald-400 mb-2 flex items-center gap-1">
-          <Check className="w-3 h-3" />{success}
+        <div className="text-xs mb-2 bg-emerald-500/8 border border-emerald-500/20 rounded-lg px-3 py-2">
+          <div className="flex items-center gap-1.5 text-emerald-400 mb-1">
+            <Check className="w-3 h-3" /><span className="font-medium">{success}</span>
+          </div>
+          <p className="text-slate-400 text-[11px]">
+            Owner saved in app.{' '}
+            {adminUrl ? (
+              <>
+                To register in Okta:{' '}
+                <a href={adminUrl} target="_blank" rel="noopener noreferrer"
+                  className="text-[#60a5fa] hover:underline">
+                  Set in Okta Admin Console →
+                </a>
+              </>
+            ) : (
+              'Also set via Okta Admin Console → AI Agents → Owners tab.'
+            )}
+          </p>
         </div>
       )}
 

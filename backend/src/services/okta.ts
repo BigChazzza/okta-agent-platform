@@ -241,34 +241,39 @@ export function agentOrnFromLinks(links: any): string {
   return match ? decodeURIComponent(match[1]) : '';
 }
 
-export async function setAgentOwner(agentId: string, userId: string): Promise<void> {
-  // 1. Get agent ORN
+export async function getAgentAdminUrl(agentId: string): Promise<string> {
+  // Build the Okta Admin Console deep-link for the agent's Owners tab
+  const orgUrl = ORG();
+  const adminUrl = orgUrl.replace('https://', 'https://').replace(/\.okta\.com$/, '-admin.okta.com').replace(/\.oktapreview\.com$/, '-admin.oktapreview.com');
+  return `${adminUrl}/admin/ai-agent/${agentId}/edit#owners`;
+}
+
+export async function removeAgentOwner(agentId: string, userId: string): Promise<void> {
+  // The IGA API supports REMOVE. Use it when revoking an owner.
   const agent = await getAIAgent(agentId);
   const agentOrn = agentOrnFromLinks(agent._links);
-  if (!agentOrn) throw new Error('Could not derive agent ORN');
+  if (!agentOrn) return;
 
-  // 2. Build user ORN — format: orn:{env}:directory:{orgId}:users:{userId}
-  // Extract orgId from the agentOrn
-  const parts = agentOrn.split(':'); // orn:oktapreview:directory:{orgId}:workload-principals:...
-  const env = parts[1]; // e.g. 'oktapreview'
-  const orgId = parts[3];
+  const parts = agentOrn.split(':');
+  const env = parts[1]; const orgId = parts[3];
   const userOrn = `orn:${env}:directory:${orgId}:users:${userId}`;
 
-  // 3. PATCH governance API to add owner
   const res = await sswsFetch('/governance/api/v1/resource-owners', {
     method: 'PATCH',
-    body: JSON.stringify({
-      resourceOrn: agentOrn,
-      data: [{ op: 'ADD', path: '/principalOrn', value: userOrn }],
-    }),
+    body: JSON.stringify({ resourceOrn: agentOrn, data: [{ op: 'REMOVE', path: '/principalOrn', value: userOrn }] }),
   });
-
-  if (!res.ok) {
-    const err = await res.json() as any;
-    // If ADD is not supported, log and continue — owner is stored in local DB
-    const msg = err.errorSummary || JSON.stringify(err.errorCauses || []);
-    console.warn(`IGA owner assignment returned ${res.status}: ${msg} — owner stored locally only`);
+  if (res.status !== 204 && !res.ok) {
+    console.warn(`IGA REMOVE owner returned ${res.status}`);
   }
+}
+
+// NOTE: The IGA PATCH endpoint only supports op:'REMOVE' in the current Beta.
+// Adding owners programmatically via API is not yet available.
+// Owners must be set in the Okta Admin Console: Admin → AI Agents → [agent] → Owners tab.
+// The app stores owner assignment locally for display purposes.
+export async function setAgentOwner(_agentId: string, _userId: string): Promise<void> {
+  // No-op: IGA ADD not supported in Beta. Owner stored in local DB only.
+  // Users should also set the owner in Okta Admin Console.
 }
 
 // ── Potential Connections (what can be connected to an agent) ─────────────────
