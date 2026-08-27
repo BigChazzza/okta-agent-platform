@@ -25,21 +25,51 @@ async function upsertAgent(oktaAgent: okta.OktaAIAgent) {
   return a;
 }
 
-// GET /api/agents — sync ALL agents from Okta, return merged with DB metadata
+// GET /api/agents — Okta is the source of truth: only return agents that exist in Okta
 router.get('/', async (_req: Request, res: Response) => {
   try {
     const oktaAgents = await okta.listAIAgents(200);
-    // Upsert all Okta agents to local DB
+    const oktaIds = new Set(oktaAgents.map(a => a.id));
+
+    // Upsert current Okta agents into local DB
     await Promise.all(oktaAgents.map(upsertAgent));
-    // Return full list with DB metadata (owner, resource count)
-    const allAgents = await db.select().from(agents).orderBy(agents.createdAt);
+
+    // Purge any local DB rows whose Okta agent has been deleted
+    const allLocal = await db.select().from(agents);
+    const stale = allLocal.filter(a => a.oktaAgentId && !oktaIds.has(a.oktaAgentId));
+    await Promise.all(stale.map(async (a) => {
+      await db.delete(agentResources).where(eq(agentResources.agentId, a.id));
+      await db.delete(agents).where(eq(agents.id, a.id));
+    }));
+
+    // Return only agents that exist in Okta, enriched with local metadata
     const withCounts = await Promise.all(
-      allAgents.map(async (agent) => {
-        const linked = await db.select().from(agentResources).where(eq(agentResources.agentId, agent.id));
-        const oktaData = oktaAgents.find(a => a.id === agent.oktaAgentId);
-        return { ...agent, resourceCount: linked.length, oktaStatus: oktaData?.status };
+      oktaAgents.map(async (oktaAgent) => {
+        // Find or create the local row
+        const localRows = await db.select().from(agents).where(eq(agents.oktaAgentId, oktaAgent.id));
+        const local = localRows[0];
+        const linked = local
+          ? await db.select().from(agentResources).where(eq(agentResources.agentId, local.id))
+          : [];
+        return {
+          ...(local || {}),
+          oktaAgentId: oktaAgent.id,
+          name: oktaAgent.profile.name,
+          description: oktaAgent.profile.description || null,
+          status: oktaAgent.status.toLowerCase(),
+          oktaStatus: oktaAgent.status,
+          resourceCount: linked.length,
+        };
       })
     );
+
+    // Sort newest first (by Okta created date)
+    withCounts.sort((a, b) => {
+      const ta = (a as any).createdAt ? new Date((a as any).createdAt).getTime() : 0;
+      const tb = (b as any).createdAt ? new Date((b as any).createdAt).getTime() : 0;
+      return tb - ta;
+    });
+
     res.json(withCounts);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
