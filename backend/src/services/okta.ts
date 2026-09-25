@@ -311,15 +311,25 @@ export type ConnectionType = typeof CONNECTION_TYPES[number];
 
 export interface PotentialConnection {
   connectionType: ConnectionType;
-  // IDENTITY_ASSERTION_CUSTOM_AS / A2A_SERVER
+  // IDENTITY_ASSERTION_CUSTOM_AS / A2A_SERVER / APP_INSTANCE (optional AS)
   authorizationServer?: { name: string; issuerUrl: string; orn: string; _links?: any };
   resourceIndicator?: string;
-  // STS_ACCESS_TOKEN / APP_INSTANCE
+  // A2A_SERVER — the other agent being connected to
   resource?: {
+    // STS_ACCESS_TOKEN shape
     appInstanceId?: string; appInstanceName?: string;
     clientAuthSettings?: { name: string; orn: string };
-    resourceType?: string; orn?: string; _links?: any;
+    resourceType?: 'API_SERVER' | 'APP_INSTANCE' | 'MCP_SERVER';
+    orn?: string; name?: string; _links?: any;
   };
+  // APP_INSTANCE
+  app?: { orn: string; name?: string; logo?: string; _links?: any };
+  // STS_SERVICE_ACCOUNT
+  serviceAccount?: { orn: string; name?: string; _links?: any };
+  // STS_VAULT_SECRET
+  secret?: { orn: string; name?: string; description?: string; _links?: any };
+  // A2A_SERVER — the other agent's a2a resource
+  a2aServer?: { orn: string; name?: string; _links?: any };
 }
 
 export async function listPotentialConnections(types?: ConnectionType[]): Promise<PotentialConnection[]> {
@@ -362,8 +372,8 @@ export async function createAgentConnection(
   let body: any;
 
   switch (connection.connectionType) {
+    // Identity assertion via a custom authorization server (resourceIndicator required)
     case 'IDENTITY_ASSERTION_CUSTOM_AS':
-    case 'IDENTITY_ASSERTION_A2A_SERVER':
       body = {
         connectionType: connection.connectionType,
         authorizationServer: { orn: connection.authorizationServer!.orn },
@@ -373,29 +383,66 @@ export async function createAgentConnection(
       if (connection.resourceIndicator) body.resourceIndicator = connection.resourceIndicator;
       break;
 
+    // Agent-to-agent — connects to another agent's A2A resource, no scopes/scopeCondition
+    case 'IDENTITY_ASSERTION_A2A_SERVER':
+      body = {
+        connectionType: connection.connectionType,
+        a2aServer: { orn: connection.a2aServer?.orn || connection.resource?.orn },
+        authorizationServer: { orn: connection.authorizationServer!.orn },
+      };
+      break;
+
+    // App instance identity assertion — requires the AS issuerUrl, not just its ORN
     case 'IDENTITY_ASSERTION_APP_INSTANCE':
       body = {
         connectionType: connection.connectionType,
-        appInstance: { orn: connection.resource?.orn },
+        app: { orn: connection.app?.orn || connection.resource?.orn },
+        issuerUrl: connection.authorizationServer?.issuerUrl,
         scopeCondition: 'ALL_SCOPES',
         scopes: ['*'],
       };
+      if (connection.resourceIndicator) body.resourceIndicator = connection.resourceIndicator;
       break;
 
-    case 'STS_ACCESS_TOKEN':
+    // Third-party app/MCP/API server access via STS — resource.orn is the client-auth-settings ORN
+    case 'STS_ACCESS_TOKEN': {
+      const r = connection.resource;
       body = {
         connectionType: connection.connectionType,
         resource: {
-          appInstanceId: connection.resource?.appInstanceId,
-          clientAuthSettings: { orn: connection.resource?.clientAuthSettings?.orn },
+          resourceType: r?.resourceType,
+          orn: r?.clientAuthSettings?.orn,
+          ...(r?.resourceType === 'APP_INSTANCE'
+            ? { appInstanceName: r?.appInstanceName }
+            : { name: r?.name }),
         },
       };
+      if (connection.resourceIndicator) body.resourceIndicator = connection.resourceIndicator;
+      break;
+    }
+
+    case 'STS_VAULT_SECRET':
+      body = {
+        connectionType: connection.connectionType,
+        secret: { orn: connection.secret?.orn },
+      };
+      if (connection.resourceIndicator) body.resourceIndicator = connection.resourceIndicator;
       break;
 
+    case 'STS_SERVICE_ACCOUNT':
+      body = {
+        connectionType: connection.connectionType,
+        app: { orn: connection.app?.orn },
+        serviceAccount: { orn: connection.serviceAccount?.orn },
+      };
+      if (connection.resourceIndicator) body.resourceIndicator = connection.resourceIndicator;
+      break;
+
+    case 'IDENTITY_ASSERTION_VIRTUAL_MCP_SERVER':
+      throw new Error('Connecting MCP servers directly is not yet supported by the Okta AI Agents API.');
+
     default:
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { connectionType: _ct, ...rest } = connection as any;
-      body = { connectionType: connection.connectionType, ...rest };
+      throw new Error(`Unsupported connection type: ${connection.connectionType}`);
   }
 
   const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/connections`, {

@@ -15,6 +15,9 @@ interface PotentialConnection {
     clientAuthSettings?: { name: string; orn: string };
     orn?: string; name?: string;
   };
+  app?: { orn: string; name?: string };
+  secret?: { orn: string; name?: string };
+  serviceAccount?: { orn: string; name?: string };
 }
 
 interface AgentConnection {
@@ -81,17 +84,23 @@ type ResourceTypeId = typeof RESOURCE_TYPES[number]['id'];
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function connectionName(conn: PotentialConnection | AgentConnection): string {
+  const c = conn as any;
+  if (c.resource?.appInstanceName) return c.resource.appInstanceName;
+  if (c.resource?.name) return c.resource.name;
+  if (c.resource?.clientAuthSettings?.name) return c.resource.clientAuthSettings.name;
+  if (c.app?.name) return c.app.name;
+  if (c.secret?.name) return c.secret.name;
+  if (c.serviceAccount?.name) return c.serviceAccount.name;
+  if (c.a2aServer?.name) return c.a2aServer.name;
   if (conn.authorizationServer?.name) return conn.authorizationServer.name;
-  const r = (conn as any).resource;
-  if (r?.appInstanceName) return r.appInstanceName;
-  if (r?.name) return r.name;
-  if (r?.clientAuthSettings?.name) return r.clientAuthSettings.name;
   return conn.connectionType;
 }
 
 function connectionSub(conn: PotentialConnection | AgentConnection): string {
   if (conn.authorizationServer?.issuerUrl) return conn.authorizationServer.issuerUrl;
-  const orn = conn.authorizationServer?.orn || (conn as any).resource?.orn || (conn as any).resource?.clientAuthSettings?.orn || '';
+  const c = conn as any;
+  const orn = conn.authorizationServer?.orn || c.resource?.orn || c.resource?.clientAuthSettings?.orn
+    || c.app?.orn || c.secret?.orn || c.serviceAccount?.orn || c.a2aServer?.orn || '';
   return orn ? orn.substring(0, 60) + (orn.length > 60 ? '…' : '') : '';
 }
 
@@ -133,11 +142,13 @@ export default function ResourcePicker({ agentId }: Props) {
   }, [agentId, loadConnections]);
 
   // ── Connected ORNs (to skip already-connected items) ──────────────────────
-  const connectedOrns = new Set(connections.map(c =>
-    c.authorizationServer?.orn ||
-    (c as any).resource?.orn ||
-    (c as any).resource?.clientAuthSettings?.orn || ''
-  ).filter(Boolean));
+  const connectedOrns = new Set(connections.map(c => {
+    const cc = c as any;
+    return c.authorizationServer?.orn ||
+      cc.resource?.orn ||
+      cc.resource?.clientAuthSettings?.orn ||
+      cc.app?.orn || cc.secret?.orn || cc.serviceAccount?.orn || cc.a2aServer?.orn || '';
+  }).filter(Boolean));
 
   // ── Add connection ─────────────────────────────────────────────────────────
   async function addConnection(conn: PotentialConnection) {
@@ -176,7 +187,8 @@ export default function ResourcePicker({ agentId }: Props) {
     ? allPotential.filter(p =>
         (selectedType.connectionTypes as readonly string[]).includes(p.connectionType) &&
         !connectedOrns.has(
-          p.authorizationServer?.orn || p.resource?.orn || p.resource?.clientAuthSettings?.orn || ''
+          p.authorizationServer?.orn || p.resource?.orn || p.resource?.clientAuthSettings?.orn
+            || p.app?.orn || p.secret?.orn || p.serviceAccount?.orn || ''
         )
       )
     : [];
