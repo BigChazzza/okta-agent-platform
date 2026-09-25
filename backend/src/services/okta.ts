@@ -235,10 +235,13 @@ export async function setAgentAuthMethod(appId: string, authMethod: string): Pro
 // Governance API to assign owners in Okta's AI Agents "Owners" tab
 
 export function agentOrnFromLinks(links: any): string {
-  // Extract agent ORN from the delegationLinks href filter param
-  const href = links?.delegationLinks?.href || '';
+  // Extract agent ORN from the delegationLinks href filter param.
+  // The href's query string is URL-encoded (e.g. %20, %22), so decode
+  // the whole string before matching the filter expression.
+  const rawHref = links?.delegationLinks?.href || '';
+  const href = decodeURIComponent(rawHref);
   const match = href.match(/to\.resourceOrn\s+eq\s+"([^"]+)"/);
-  return match ? decodeURIComponent(match[1]) : '';
+  return match ? match[1] : '';
 }
 
 export async function getAgentAdminUrl(agentId: string): Promise<string> {
