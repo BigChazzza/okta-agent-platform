@@ -135,18 +135,22 @@ router.put('/:id/owner', async (req: Request, res: Response) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId is required' });
   try {
+    const [agent] = await db.select().from(agents).where(eq(agents.id, req.params.id));
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    if (!agent.oktaAgentId) return res.status(400).json({ error: 'Agent has no linked Okta agent' });
+
     const user = await okta.getUser(userId);
-    // 1. Store in local DB
+
+    // 1. Register the owner in Okta's IGA resource-owners registry (source of truth)
+    await okta.setAgentOwner(agent.oktaAgentId, userId);
+
+    // 2. Mirror locally for fast display
     const [updated] = await db.update(agents)
       .set({ ownerId: user.id, ownerName: user.displayName, ownerEmail: user.email })
       .where(eq(agents.id, req.params.id)).returning();
-    if (!updated) return res.status(404).json({ error: 'Agent not found' });
-    // Build admin console link for the user to also set in Okta
-    let adminConsoleUrl: string | undefined;
-    if (updated.oktaAgentId) {
-      try { adminConsoleUrl = await okta.getAgentAdminUrl(updated.oktaAgentId); } catch {}
-    }
-    res.json({ ...updated, adminConsoleUrl, ownerNote: 'Owner saved in app. To register in Okta, set via Admin Console → AI Agents → Owners tab.' });
+
+    const adminConsoleUrl = await okta.getAgentAdminUrl(agent.oktaAgentId).catch(() => undefined);
+    res.json({ ...updated, adminConsoleUrl });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

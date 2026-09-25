@@ -267,13 +267,29 @@ export async function removeAgentOwner(agentId: string, userId: string): Promise
   }
 }
 
-// NOTE: The IGA PATCH endpoint only supports op:'REMOVE' in the current Beta.
-// Adding owners programmatically via API is not yet available.
-// Owners must be set in the Okta Admin Console: Admin → AI Agents → [agent] → Owners tab.
-// The app stores owner assignment locally for display purposes.
-export async function setAgentOwner(_agentId: string, _userId: string): Promise<void> {
-  // No-op: IGA ADD not supported in Beta. Owner stored in local DB only.
-  // Users should also set the owner in Okta Admin Console.
+// Assigns (or replaces) the owner for an AI agent resource via the IGA
+// Resource Owners API. POST replaces the full owner list for the resource,
+// which is exactly the "set owner" semantics this app needs.
+// https://developer.okta.com/docs/api/iga/openapi/governance-production-reference/resource-owners
+export async function setAgentOwner(agentId: string, userId: string): Promise<void> {
+  const agent = await getAIAgent(agentId);
+  const agentOrn = agentOrnFromLinks(agent._links);
+  if (!agentOrn) {
+    throw new Error("Could not resolve this agent's resource ORN from Okta — it may need to be activated first.");
+  }
+
+  const parts = agentOrn.split(':');
+  const env = parts[1]; const orgId = parts[3];
+  const userOrn = `orn:${env}:directory:${orgId}:users:${userId}`;
+
+  const res = await sswsFetch('/governance/api/v1/resource-owners', {
+    method: 'POST',
+    body: JSON.stringify({ resourceOrns: [agentOrn], principalOrns: [userOrn] }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as any;
+    throw new Error(err.errorSummary || err.error?.message || `setAgentOwner ${res.status}`);
+  }
 }
 
 // ── Potential Connections (what can be connected to an agent) ─────────────────

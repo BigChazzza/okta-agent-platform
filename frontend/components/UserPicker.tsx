@@ -98,17 +98,12 @@ export default function UserPicker({ agentId, currentOwner: initialOwner, onAssi
             <Check className="w-3 h-3" /><span className="font-medium">{success}</span>
           </div>
           <p className="text-slate-400 text-[11px]">
-            Owner saved in app.{' '}
-            {adminUrl ? (
-              <>
-                To register in Okta:{' '}
-                <a href={adminUrl} target="_blank" rel="noopener noreferrer"
-                  className="text-[#60a5fa] hover:underline">
-                  Set in Okta Admin Console →
-                </a>
-              </>
-            ) : (
-              'Also set via Okta Admin Console → AI Agents → Owners tab.'
+            Registered in Okta&apos;s IGA resource-owners registry.{' '}
+            {adminUrl && (
+              <a href={adminUrl} target="_blank" rel="noopener noreferrer"
+                className="text-[#60a5fa] hover:underline">
+                View in Okta Admin Console →
+              </a>
             )}
           </p>
         </div>
