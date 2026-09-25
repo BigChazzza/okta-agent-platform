@@ -3,7 +3,6 @@ import Link from 'next/link';
 import { apiFetch } from '@/lib/api';
 import StatusBadge from '@/components/StatusBadge';
 import UserPicker from '@/components/UserPicker';
-import { ExternalLink } from 'lucide-react';
 import ResourcePicker from '@/components/ResourcePicker';
 import AgentLifecycle from './AgentLifecycle';
 import AgentCredentials from './AgentCredentials';
@@ -78,27 +77,11 @@ export default async function AgentDetailPage({ params }: { params: { id: string
 
       {/* Owner */}
       <section className="bg-[#111827] border border-[#1e293b] rounded-xl p-5 mb-4">
-        <div className="flex items-start justify-between mb-4 gap-3">
-          <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#1662dd]" />
-            Owner
-          </h2>
-          {agent.adminConsoleUrl && (
-            <a
-              href={agent.adminConsoleUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1.5 text-xs font-medium text-[#60a5fa] hover:text-blue-300 flex-shrink-0 bg-[#1662dd]/10 border border-[#1662dd]/25 px-2.5 py-1.5 rounded-lg transition-colors"
-            >
-              <ExternalLink className="w-3 h-3" />
-              View in Okta Admin Console
-            </a>
-          )}
-        </div>
+        <h2 className="text-sm font-semibold text-white flex items-center gap-2 mb-4">
+          <span className="w-1.5 h-1.5 rounded-full bg-[#1662dd]" />
+          Owner
+        </h2>
         <UserPicker agentId={agent.id} currentOwner={currentOwner} />
-        <p className="text-[11px] text-slate-600 mt-3">
-          Owner is registered directly in Okta&apos;s governance (IGA) resource-owners registry, and mirrored here for display.
-        </p>
       </section>
 
       {/* Connections */}
