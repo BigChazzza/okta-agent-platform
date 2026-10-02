@@ -745,13 +745,22 @@ export async function setAppAuthMethodAndRedirect(appId: string, redirectUri: st
   app.settings = app.settings || {};
   app.settings.oauthClient = app.settings.oauthClient || {};
 
+  let hasJwks = false;
   if (currentAuthMethod === 'private_key_jwt') {
     const jwksRes = await sswsFetch(`/api/v1/apps/${appId}/credentials/jwks`);
     if (jwksRes.ok) {
       const { keys } = await jwksRes.json() as any;
-      app.settings.oauthClient.jwks = { keys: keys.map((k: any) => ({ kty: k.kty, kid: k.kid, use: k.use, alg: k.alg, e: k.e, n: k.n })) };
+      if (Array.isArray(keys) && keys.length > 0) {
+        app.settings.oauthClient.jwks = { keys: keys.map((k: any) => ({ kty: k.kty, kid: k.kid, use: k.use, alg: k.alg, e: k.e, n: k.n })) };
+        hasJwks = true;
+      }
     }
-  } else {
+  }
+  // Fall back to client_secret_basic whenever the app isn't actually on a usable private_key_jwt
+  // configuration yet (e.g. a freshly-created backing app with no JWKS registered) — Okta
+  // requires jwks be present on any PUT while private_key_jwt is set, so there's no key material
+  // to preserve in that case anyway.
+  if (currentAuthMethod !== 'private_key_jwt' || !hasJwks) {
     app.credentials.oauthClient.token_endpoint_auth_method = 'client_secret_basic';
     delete app.credentials.oauthClient.pkce_required;
   }
