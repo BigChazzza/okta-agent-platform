@@ -465,3 +465,146 @@ export async function deleteAgentConnection(agentId: string, connectionId: strin
   );
   if (res.status !== 204 && !res.ok) throw new Error(`deleteConnection ${res.status}`);
 }
+
+// ── System Log (Logging page) ──────────────────────────────────────────────────
+
+export interface OktaLogEvent {
+  uuid: string; published: string; eventType: string; displayMessage: string;
+  outcome: { result: string; reason?: string };
+  actor: { id: string; type: string; displayName?: string; alternateId?: string };
+  target?: { id: string; type: string; displayName?: string }[];
+  debugContext?: { debugData?: Record<string, any> };
+  transaction?: { id: string };
+}
+
+// Org-wide (not agent-scoped) — every OAuth2 grant/authorize event in the time range, paginated
+// via the response's own Link header (a 24h window can exceed the 1000-per-page cap). sswsFetch
+// always resolves its `path` against ORG(), so the next-page URL from the Link header (which is
+// already a full URL) has its origin stripped before being re-passed in as a path.
+export async function getOAuthSystemLogs(sinceIso: string, untilIso: string): Promise<OktaLogEvent[]> {
+  const all: OktaLogEvent[] = [];
+  let path: string | undefined = `/api/v1/logs?${new URLSearchParams({
+    since: sinceIso, until: untilIso, filter: 'eventType sw "app.oauth2."', limit: '1000', sortOrder: 'ASCENDING',
+  })}`;
+  for (let page = 0; page < 10 && path; page++) {
+    const res = await sswsFetch(path);
+    if (!res.ok) break;
+    all.push(...(await res.json() as OktaLogEvent[]));
+    const nextUrl = res.headers.get('link')?.match(/<([^>]+)>;\s*rel="next"/)?.[1];
+    path = nextUrl ? nextUrl.replace(ORG(), '') : undefined;
+  }
+  return all;
+}
+
+export interface LogHop {
+  eventType: string; published: string; outcome: string; reason?: string;
+  actorId: string; actorType: string; actorDisplayName?: string;
+  issuedTokenId?: string; issuedTokenType?: 'access_token' | 'id_jag' | 'id_token';
+  subjectTokenId?: string;
+  resourceType?: string; resourceName?: string;
+  requestId?: string;
+  raw: OktaLogEvent;
+}
+export interface LogInteraction {
+  rootTokenId: string; hops: LogHop[]; startedAt: string;
+  actorIds: Set<string>;
+}
+
+const ISSUED_TOKEN_TYPES = ['access_token', 'id_jag', 'id_token'];
+
+// Groups flat System Log events into end-to-end interaction chains by following Okta's own
+// token-lineage pointers: a grant event's target[] names the token/id-jag/id_token it just
+// issued, and a consuming event's debugContext.debugData.subjectTokenId names the exact upstream
+// token it presented.
+//
+// Token lineage is a TREE (a token can fan out — e.g. one cached access token gets exchanged more
+// than once within its TTL), not a set of disjoint groups — union-find is wrong here since it
+// would merge every unrelated branch that ever consumed the same reused token into one blob.
+// Enumerating every distinct root-to-leaf path instead yields one interaction per actual
+// end-to-end call, even when several interactions share the same opening hop(s).
+export function clusterLogInteractions(events: OktaLogEvent[]): LogInteraction[] {
+  const hops: LogHop[] = events
+    .filter(e => e.eventType.startsWith('app.oauth2.') && (e.eventType.includes('grant') || e.eventType === 'app.oauth2.authorize'))
+    .map(e => {
+      // target[] lists both the consumed (subject) and produced (issued) token on an exchange/
+      // redemption event, with no type-priority order — the ISSUED token is the LAST entry in
+      // practice (the only exceptions are refresh_token grants and unrelated consent-grant
+      // events, neither part of this lineage). subjectTokenId in debugData is the authoritative
+      // subject when present (token-exchange events set it); jwt-bearer redemptions don't set it
+      // at all, so fall back to the issued-token-typed entry appearing BEFORE the last element —
+      // that's exactly the id_jag/access_token that hop's own token-exchange step produced.
+      const target = e.target || [];
+      const issued = ISSUED_TOKEN_TYPES.includes(target[target.length - 1]?.type) ? target[target.length - 1] : undefined;
+      const dd = e.debugContext?.debugData;
+      const subjectTokenId = dd?.subjectTokenId
+        || target.slice(0, -1).find(t => ISSUED_TOKEN_TYPES.includes(t.type))?.id;
+      return {
+        eventType: e.eventType, published: e.published, outcome: e.outcome.result, reason: e.outcome.reason,
+        actorId: e.actor.id, actorType: e.actor.type, actorDisplayName: e.actor.displayName,
+        issuedTokenId: issued?.id, issuedTokenType: issued?.type as LogHop['issuedTokenType'],
+        subjectTokenId,
+        resourceType: dd?.resourceType,
+        resourceName: dd?.authorizationServerName || dd?.resource,
+        requestId: dd?.requestId as string | undefined,
+        raw: e,
+      };
+    });
+
+  const issuedTokenIds = new Set(hops.filter(h => h.issuedTokenId).map(h => h.issuedTokenId!));
+  const childrenByToken = new Map<string, LogHop[]>();
+  for (const h of hops) {
+    if (!h.subjectTokenId) continue;
+    if (!childrenByToken.has(h.subjectTokenId)) childrenByToken.set(h.subjectTokenId, []);
+    childrenByToken.get(h.subjectTokenId)!.push(h);
+  }
+
+  // An authorization_code redemption issues an id_token AND an access_token in the same request
+  // (same requestId) — only the id_token is ever consumed downstream (by a token-exchange); the
+  // sibling access_token grant is real but genuinely never used again, with no subjectTokenId/
+  // children of its own, so it would otherwise become its own disconnected 1-hop "interaction".
+  // Since both grants share the same actor and requestId, fold the unused sibling into the SAME
+  // hop-list position as the one that does lead somewhere, rather than showing it as a separate row.
+  const byRequestId = new Map<string, LogHop[]>();
+  for (const h of hops) {
+    if (!h.requestId) continue;
+    if (!byRequestId.has(h.requestId)) byRequestId.set(h.requestId, []);
+    byRequestId.get(h.requestId)!.push(h);
+  }
+  const attachedHops = new Map<LogHop, LogHop[]>(); // host hop -> sibling hops to fold in alongside it
+  const attachedSet = new Set<LogHop>();
+  for (const group of byRequestId.values()) {
+    if (group.length < 2) continue;
+    const withChildren = group.filter(h => h.issuedTokenId && childrenByToken.has(h.issuedTokenId));
+    const dangling = group.filter(h => !h.subjectTokenId && !(h.issuedTokenId && childrenByToken.has(h.issuedTokenId)));
+    if (withChildren.length === 1 && dangling.length > 0) {
+      attachedHops.set(withChildren[0], dangling);
+      for (const h of dangling) attachedSet.add(h);
+    }
+  }
+
+  // A root is a hop with no subjectTokenId, or one whose subjectTokenId's own grant wasn't
+  // captured in this time range (the chain started before the window) — either way, nothing in
+  // this fetch can be its parent, so it begins its own interaction. Hops folded into a sibling
+  // above are excluded here so they don't also form their own separate root.
+  const roots = hops.filter(h => (!h.subjectTokenId || !issuedTokenIds.has(h.subjectTokenId)) && !attachedSet.has(h));
+
+  const interactions: LogInteraction[] = [];
+  function walk(path: LogHop[], hop: LogHop, visitedTokens: Set<string>) {
+    const nextPath = [...path, hop, ...(attachedHops.get(hop) || [])];
+    const children = hop.issuedTokenId ? childrenByToken.get(hop.issuedTokenId) : undefined;
+    // visitedTokens guards against a malformed/cyclic lineage looping forever — real token ids are
+    // unique per grant, so this should never trigger in practice.
+    if (!children?.length || (hop.issuedTokenId && visitedTokens.has(hop.issuedTokenId))) {
+      interactions.push({
+        rootTokenId: nextPath[0].issuedTokenId || nextPath[0].raw.uuid, hops: nextPath, startedAt: nextPath[0].published,
+        actorIds: new Set(nextPath.map(h => h.actorId)),
+      });
+      return;
+    }
+    const nextVisited = hop.issuedTokenId ? new Set(visitedTokens).add(hop.issuedTokenId) : visitedTokens;
+    for (const child of children) walk(nextPath, child, nextVisited);
+  }
+  for (const root of roots) walk([], root, new Set());
+
+  return interactions.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}

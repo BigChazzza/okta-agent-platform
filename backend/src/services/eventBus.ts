@@ -36,6 +36,7 @@ const PATH_LABELS: [RegExp, string][] = [
   [/\/api\/v1\/authorizationServers/i, 'List Authorization Servers'],
   [/\/governance\/api\/v1\/resource-owners/i, 'Set Resource Owner (IGA)'],
   [/\/oauth2\/v1\/token/i, 'Get Access Token'],
+  [/\/api\/v1\/logs/i, 'Query System Log'],
 ];
 
 export function labelForPath(method: string, path: string): string {
