@@ -16,6 +16,17 @@ export interface OktaApiEvent {
 export const eventBus = new EventEmitter();
 eventBus.setMaxListeners(50);
 
+// Agent request wizard — translated, human-readable progress milestones
+// (emitted on 'agent-request:milestone', separate from the raw Okta API log above)
+export interface AgentRequestMilestoneEvent {
+  id: string;
+  ts: string;
+  label: string;
+  status: 'done' | 'error';
+  detail?: string;
+  error?: string;
+}
+
 let seq = 0;
 export function nextId() { return `evt-${Date.now()}-${++seq}`; }
 

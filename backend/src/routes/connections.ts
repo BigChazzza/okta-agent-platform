@@ -27,6 +27,20 @@ router.get('/:id/potential-connections/:type', async (req: Request, res: Respons
   }
 });
 
+// GET /api/agents/:id/authorization-servers/:authServerId/scopes — the AS's own scope catalog,
+// for the "Only these scopes" picker. System scopes (openid/profile/email/etc) are filtered out —
+// the picker is only useful for the AS's actual custom scopes. :id is unused (the scope catalog
+// isn't agent-specific) but kept in the path to match this router's other agent-scoped routes —
+// callers without a real agent yet (e.g. the onboarding wizard) can pass any placeholder value.
+router.get('/:id/authorization-servers/:authServerId/scopes', async (req: Request, res: Response) => {
+  try {
+    const scopes = await okta.listAuthorizationServerScopes(req.params.authServerId);
+    res.json(scopes.filter((s) => !s.system));
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/agents/:id/connections — current Okta connections
 router.get('/:id/connections', async (req: Request, res: Response) => {
   try {

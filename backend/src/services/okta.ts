@@ -1,7 +1,7 @@
 // Okta Management API + AI Agents (Secures AI / Workload Principals) API
 // All calls use SSWS API token — simpler, no OAuth2 M2M needed.
 
-import { randomUUID } from 'crypto';
+import { randomUUID, generateKeyPairSync } from 'crypto';
 import { importPKCS8, SignJWT } from 'jose';
 import { eventBus, nextId, labelForPath } from './eventBus';
 
@@ -98,6 +98,19 @@ export async function getUser(userId: string): Promise<OktaUser> {
     displayName: `${u.profile.firstName} ${u.profile.lastName}`.trim() || u.profile.login,
     status: u.status,
   };
+}
+
+export interface OktaGroup {
+  id: string; name: string; description?: string;
+}
+
+export async function listGroups(query?: string, limit = 25): Promise<OktaGroup[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (query) params.set('q', query);
+  const res = await sswsFetch(`/api/v1/groups?${params}`);
+  if (!res.ok) throw new Error(`listGroups ${res.status}: ${await res.text()}`);
+  const groups = await res.json() as any[];
+  return groups.map((g) => ({ id: g.id, name: g.profile.name, description: g.profile.description }));
 }
 
 // ── AI Agents (Secures AI / Workload Principals) ───────────────────────────────
@@ -246,7 +259,37 @@ export async function setAgentAuthMethod(appId: string, authMethod: string): Pro
     clientId: creds.client_id || appId,
     authMethod: creds.token_endpoint_auth_method,
     hasSecret: authMethod !== 'none' && authMethod !== 'private_key_jwt',
+    // Present in Okta's PUT response the same way rotateAppSecret's already is — surfaced here so
+    // callers that just switched an agent to client_secret_basic can persist it immediately
+    // instead of it only being shown once and then lost.
+    clientSecret: creds.client_secret,
   };
+}
+
+export async function assignUserToApp(appId: string, userId: string): Promise<void> {
+  const res = await sswsFetch(`/api/v1/apps/${appId}/users`, {
+    method: 'POST', body: JSON.stringify({ id: userId }),
+  });
+  if (!res.ok) {
+    const err = await res.json() as any;
+    throw new Error(err.errorSummary || `assignUserToApp ${res.status}`);
+  }
+}
+
+export async function assignGroupToApp(appId: string, groupId: string): Promise<void> {
+  const res = await sswsFetch(`/api/v1/apps/${appId}/groups/${groupId}`, { method: 'PUT' });
+  if (!res.ok) {
+    const err = await res.json() as any;
+    throw new Error(err.errorSummary || `assignGroupToApp ${res.status}`);
+  }
+}
+
+export async function listAppUsers(appId: string): Promise<OktaUser[]> {
+  const res = await sswsFetch(`/api/v1/apps/${appId}/users`);
+  if (!res.ok) throw new Error(`listAppUsers ${res.status}: ${await res.text()}`);
+  const appUsers = await res.json() as any[];
+  const users = await Promise.all(appUsers.map((au) => getUser(au.id).catch(() => null)));
+  return users.filter((u): u is OktaUser => !!u);
 }
 
 // ── IGA Resource Owners ───────────────────────────────────────────────────────
@@ -348,6 +391,9 @@ export interface PotentialConnection {
   secret?: { orn: string; name?: string; description?: string; _links?: any };
   // A2A_SERVER — the other agent's a2a resource
   a2aServer?: { orn: string; name?: string; _links?: any };
+  // IDENTITY_ASSERTION_CUSTOM_AS only — set by the frontend's scope picker before POSTing.
+  // Present and non-empty => grant only these scopes; absent/empty => grant all (unchanged default).
+  selectedScopes?: string[];
 }
 
 export async function listPotentialConnections(types?: ConnectionType[]): Promise<PotentialConnection[]> {
@@ -395,8 +441,9 @@ export async function createAgentConnection(
       body = {
         connectionType: connection.connectionType,
         authorizationServer: { orn: connection.authorizationServer!.orn },
-        scopeCondition: 'ALL_SCOPES',
-        scopes: ['*'],
+        ...(connection.selectedScopes && connection.selectedScopes.length > 0
+          ? { scopeCondition: 'INCLUDE_ONLY', scopes: connection.selectedScopes }
+          : { scopeCondition: 'ALL_SCOPES', scopes: ['*'] }),
       };
       if (connection.resourceIndicator) body.resourceIndicator = connection.resourceIndicator;
       break;
@@ -543,6 +590,14 @@ export function orgIdFromAgentOrn(orn: string): string {
   return orn.split(':')[3];
 }
 
+// Self-healing fallback when nothing in the request itself gives us the org ID — grabs any
+// existing agent's ORN just to pull the org ID segment out of it.
+export async function getAnyOrgId(): Promise<string | undefined> {
+  const existing = await listAIAgents(1);
+  const orn = existing[0] ? agentOrnFromLinks(existing[0]._links) : '';
+  return orn ? orgIdFromAgentOrn(orn) : undefined;
+}
+
 export function buildAuthorizationServerOrn(authServerId: string, orgId: string): string {
   return `orn:oktapreview:idp:${orgId}:authorization_servers:${authServerId}`;
 }
@@ -591,6 +646,15 @@ export async function listAuthorizationServers(orgId: string): Promise<Authoriza
   if (!res.ok) throw new Error(`listAuthorizationServers ${res.status}: ${await res.text()}`);
   const servers = await res.json() as any[];
   return servers.map((s) => ({ id: s.id, name: s.name, orn: buildAuthorizationServerOrn(s.id, orgId) }));
+}
+
+export interface AuthorizationServerScope { id: string; name: string; description: string | null; system: boolean; }
+
+export async function listAuthorizationServerScopes(authServerId: string): Promise<AuthorizationServerScope[]> {
+  const res = await sswsFetch(`/api/v1/authorizationServers/${authServerId}/scopes`);
+  if (!res.ok) throw new Error(`listAuthorizationServerScopes ${res.status}: ${await res.text()}`);
+  const scopes = await res.json() as any[];
+  return scopes.map((s) => ({ id: s.id, name: s.name, description: s.description ?? null, system: !!s.system }));
 }
 
 // Surfaces the real issuer URL — needed to build a token endpoint for the Exercise feature.
@@ -1009,6 +1073,26 @@ export async function createAgentSecret(agentId: string): Promise<{ id: string; 
     }
   }
   throw new Error(`createAgentSecret ${res.status}: ${errText}`);
+}
+
+// Generates a real RSA keypair server-side and registers the public half as a native agent's
+// private_key_jwt credential — only possible for a native (no backing app) agent, since Okta
+// requires the public key be uploaded manually in the Admin Console for an app-backed agent's
+// private_key_jwt method. Okta never returns the private key again after this call, so the PEM
+// has to be persisted by the caller the moment it's minted.
+export async function createAgentJwk(agentId: string): Promise<{ kid: string; privateKeyPem: string }> {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = publicKey.export({ format: 'jwk' }) as any;
+  const kid = randomUUID().replace(/-/g, '');
+
+  const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/credentials/jwks`, {
+    method: 'POST',
+    body: JSON.stringify({ kty: jwk.kty, use: 'sig', kid, alg: 'RS256', n: jwk.n, e: jwk.e }),
+  });
+  if (!res.ok) throw new Error(`createAgentJwk ${res.status}: ${await res.text()}`);
+
+  const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+  return { kid, privateKeyPem };
 }
 
 // ── System Log (Logging page) ──────────────────────────────────────────────────
