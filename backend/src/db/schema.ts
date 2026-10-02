@@ -11,6 +11,9 @@ export const agents = pgTable('agents', {
   status: text('status').default('pending').notNull(),
   createdBy: text('created_by'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  testClientSecret: text('test_client_secret'),
+  testPrivateKeyPem: text('test_private_key_pem'),
+  testPrivateKeyKid: text('test_private_key_kid'),
 });
 
 export const resources = pgTable('resources', {

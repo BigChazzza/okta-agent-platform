@@ -6,6 +6,8 @@ import usersRouter from './routes/users';
 import resourcesRouter from './routes/resources';
 import connectionsRouter from './routes/connections';
 import loggingRouter from './routes/logging';
+import exerciseRouter from './routes/exercise';
+import appsRouter from './routes/apps';
 import { eventBus, OktaApiEvent } from './services/eventBus';
 import { migrate, seedResources } from './db/client';
 
@@ -67,6 +69,8 @@ app.use('/api/agents', connectionsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/resources', resourcesRouter);
 app.use('/api/logging', loggingRouter);
+app.use('/api/exercise', exerciseRouter);
+app.use('/api/apps', appsRouter);
 
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);

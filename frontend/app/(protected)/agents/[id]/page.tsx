@@ -6,6 +6,7 @@ import UserPicker from '@/components/UserPicker';
 import ResourcePicker from '@/components/ResourcePicker';
 import AgentLifecycle from './AgentLifecycle';
 import AgentCredentials from './AgentCredentials';
+import MachineAccess from './MachineAccess';
 import { ArrowLeft, Bot, Shield, Calendar, Key } from 'lucide-react';
 
 export default async function AgentDetailPage({ params }: { params: { id: string } }) {
@@ -82,6 +83,16 @@ export default async function AgentDetailPage({ params }: { params: { id: string
           Owner
         </h2>
         <UserPicker agentId={agent.id} currentOwner={currentOwner} />
+      </section>
+
+      {/* Machine Access */}
+      <section className="bg-[#111827] border border-[#1e293b] rounded-xl p-5 mb-4">
+        <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+          Machine Access
+          <span className="text-xs text-slate-500 font-normal">— agents and apps authorized to call this agent</span>
+        </h2>
+        <MachineAccess agentId={agent.id} />
       </section>
 
       {/* Connections */}

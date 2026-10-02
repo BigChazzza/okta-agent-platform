@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { signOut } from 'next-auth/react';
-import { Bot, Users, Puzzle, LayoutDashboard, LogOut, History } from 'lucide-react';
+import { Bot, Users, Puzzle, LayoutDashboard, LogOut, History, Zap } from 'lucide-react';
 import clsx from 'clsx';
 
 const links = [
@@ -10,6 +10,7 @@ const links = [
   { href: '/agents', label: 'AI Agents', icon: Bot },
   { href: '/users', label: 'Users', icon: Users },
   { href: '/resources', label: 'Resources', icon: Puzzle },
+  { href: '/exercise', label: 'Exercise', icon: Zap },
   { href: '/logging', label: 'Logging', icon: History },
 ];
 

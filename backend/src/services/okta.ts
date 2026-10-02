@@ -1,10 +1,18 @@
 // Okta Management API + AI Agents (Secures AI / Workload Principals) API
 // All calls use SSWS API token — simpler, no OAuth2 M2M needed.
 
+import { randomUUID } from 'crypto';
+import { importPKCS8, SignJWT } from 'jose';
 import { eventBus, nextId, labelForPath } from './eventBus';
 
 const ORG = () => process.env.OKTA_ORG_URL!;
 const TOKEN = () => process.env.OKTA_API_TOKEN!;
+
+function maskSecrets(value: any): any {
+  return JSON.parse(JSON.stringify(value, (k, v) =>
+    ['client_secret', 'secret', 'password', 'token', 'Authorization'].includes(k) ? '***' : v
+  ));
+}
 
 async function sswsFetch(path: string, init: RequestInit = {}) {
   const method = (init.method || 'GET').toUpperCase();
@@ -98,6 +106,7 @@ export interface OktaAIAgent {
   id: string; platform: string; status: string; appId?: string;
   profile: { name: string; description?: string };
   created?: string; lastUpdated?: string; _links?: any;
+  signOnProvider?: { type?: string; appInstanceId?: string };
 }
 
 async function pollOperation(opUrl: string, maxAttempts = 15): Promise<string> {
@@ -464,6 +473,438 @@ export async function deleteAgentConnection(agentId: string, connectionId: strin
     { method: 'DELETE' }
   );
   if (res.status !== 204 && !res.ok) throw new Error(`deleteConnection ${res.status}`);
+}
+
+// ── User Access (agent's backing OIDC app) ────────────────────────────────────
+
+async function patchAIAgent(agentId: string, body: any): Promise<void> {
+  const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}`, {
+    method: 'PATCH', body: JSON.stringify(body),
+    headers: { 'Content-Type': 'application/merge-patch+json' },
+  });
+  if (res.status === 202) {
+    const opUrl = res.headers.get('Location');
+    if (opUrl) await pollOperation(opUrl);
+    return;
+  }
+  if (!res.ok) {
+    const err = await res.json() as any;
+    throw new Error(err.errorSummary || `patchAIAgent ${res.status}`);
+  }
+}
+
+export async function enableUserAccess(agentId: string): Promise<void> {
+  await patchAIAgent(agentId, { signOnProvider: { type: 'NEW_OIDC_APP' } });
+}
+
+export async function setAgentResourceUrl(agentId: string, resourceUrl: string): Promise<void> {
+  await patchAIAgent(agentId, { resourceUrl });
+}
+
+// Okta creates the backing OIDC app INACTIVE — assigning a user to / logging into an inactive
+// app fails with a misleading "AppInstance not found" 404. Re-activating an already active app
+// is a no-op on Okta's side.
+export async function activateApp(appId: string): Promise<void> {
+  const res = await sswsFetch(`/api/v1/apps/${appId}/lifecycle/activate`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json() as any;
+    throw new Error(err.errorSummary || `activateApp ${res.status}`);
+  }
+}
+
+// Orchestrates the streamlined flow: ensure the agent has a backing OIDC app, ensure it's
+// active, and return its appId — ready for a real login test. Safe to call repeatedly; each
+// step is a no-op if already done.
+export async function ensureUserAccess(agentId: string): Promise<string> {
+  let agent = await getAIAgent(agentId);
+  if (!agent.signOnProvider?.appInstanceId) {
+    await enableUserAccess(agentId);
+    agent = await getAIAgent(agentId);
+  }
+  const appId = agent.signOnProvider?.appInstanceId;
+  if (!appId) throw new Error('Failed to provision a backing app for this agent');
+  await activateApp(appId);
+  return appId;
+}
+
+// ── ORN helpers (Exercise / Machine Access) ───────────────────────────────────
+
+export function orgIdFromAgentOrn(orn: string): string {
+  // orn:<env>:directory:<orgId>:workload-principals:ai-agents:<id>
+  return orn.split(':')[3];
+}
+
+export function buildAuthorizationServerOrn(authServerId: string, orgId: string): string {
+  return `orn:oktapreview:idp:${orgId}:authorization_servers:${authServerId}`;
+}
+
+// A service app (OAuth Service application) authorized as a Machine Access caller — the same
+// delegation-links endpoint used for agent-to-agent callers, but from.clientOrn points at the
+// app itself rather than at an agent's workload-principal ORN.
+export function buildAppOrn(appId: string, orgId: string): string {
+  return `orn:oktapreview:idp:${orgId}:apps:oidc_client:${appId}`;
+}
+
+// An agent's own auto-created a2a resource server — the ORN a resource connection's `resource`
+// field points at when the target is another AI agent.
+export function buildA2AResourceOrn(agentId: string, orgId: string): string {
+  return `orn:oktapreview:directory:${orgId}:resource-servers:a2a:${agentId}`;
+}
+
+export interface AppOption { id: string; label: string; applicationType?: string; }
+
+// Search Okta OAuth apps by name — backs the "Service app" caller picker for Machine Access.
+// Okta's Apps API has no server-side filter for application_type, so this fetches a larger batch
+// and filters to real service clients client-side, excluding Okta's own built-in system apps.
+export async function searchApps(query?: string, limit = 20): Promise<AppOption[]> {
+  const params = new URLSearchParams({ limit: '200' });
+  if (query) params.set('q', query);
+  const res = await sswsFetch(`/api/v1/apps?${params}`);
+  if (!res.ok) throw new Error(`searchApps ${res.status}: ${await res.text()}`);
+  const apps = await res.json() as any[];
+  return apps
+    .filter((a) => a.settings?.oauthClient?.application_type === 'service')
+    .slice(0, limit)
+    .map((a) => ({ id: a.id, label: a.label, applicationType: a.settings?.oauthClient?.application_type }));
+}
+
+export async function getApp(appId: string): Promise<AppOption> {
+  const res = await sswsFetch(`/api/v1/apps/${appId}`);
+  if (!res.ok) throw new Error(`getApp ${res.status}`);
+  const a = await res.json() as any;
+  return { id: a.id, label: a.label, applicationType: a.settings?.oauthClient?.application_type };
+}
+
+export interface AuthorizationServer { id: string; name: string; orn: string; }
+
+export async function listAuthorizationServers(orgId: string): Promise<AuthorizationServer[]> {
+  const res = await sswsFetch('/api/v1/authorizationServers');
+  if (!res.ok) throw new Error(`listAuthorizationServers ${res.status}: ${await res.text()}`);
+  const servers = await res.json() as any[];
+  return servers.map((s) => ({ id: s.id, name: s.name, orn: buildAuthorizationServerOrn(s.id, orgId) }));
+}
+
+// Surfaces the real issuer URL — needed to build a token endpoint for the Exercise feature.
+export async function getAuthorizationServer(authServerId: string): Promise<{ id: string; name: string; issuer: string }> {
+  const res = await sswsFetch(`/api/v1/authorizationServers/${authServerId}`);
+  if (!res.ok) throw new Error(`getAuthorizationServer ${res.status}: ${await res.text()}`);
+  const s = await res.json() as any;
+  return { id: s.id, name: s.name, issuer: s.issuer };
+}
+
+// The agent's own /ai-agents/{id} response never includes resourceUrl — it only shows up on the
+// auto-created a2a resource server once set (and can't be changed after that point).
+export async function getAgentResourceUrl(agentId: string): Promise<string | undefined> {
+  const res = await sswsFetch(`/resource-servers/api/v1/a2a-servers/${agentId}`);
+  if (res.status === 404) return undefined;
+  if (!res.ok) throw new Error(`getAgentResourceUrl ${res.status}: ${await res.text()}`);
+  const data = await res.json() as any;
+  return data.resourceUrl;
+}
+
+export async function connectAuthorizationServer(agentId: string, authServerOrn: string): Promise<void> {
+  const res = await sswsFetch(`/resource-servers/api/v1/a2a-servers/${agentId}/authorization-servers`, {
+    method: 'POST', body: JSON.stringify({ orn: authServerOrn, type: 'OKTA' }),
+  });
+  if (res.status !== 204 && !res.ok) {
+    const err = await res.json() as any;
+    throw new Error(err.errorSummary || `connectAuthorizationServer ${res.status}`);
+  }
+}
+
+// Orchestrates the streamlined Machine Access flow: ensure the target agent has an audience/
+// resource URL (computing one from its own agent ID if it doesn't have one yet — Okta won't let
+// an existing value be changed, so this is a no-op when already set), connect the given shared
+// authorization server to it, and return both ORNs ready for createDelegationLink.
+export async function ensureMachineAccess(agentId: string, authServerId: string): Promise<{ targetOrn: string; authServerOrn: string }> {
+  const agent = await getAIAgent(agentId);
+  const targetOrn = agentOrnFromLinks(agent._links);
+  if (!targetOrn) throw new Error('Could not resolve agent ORN — agent may not be fully provisioned yet');
+
+  const existingResourceUrl = await getAgentResourceUrl(agentId);
+  if (!existingResourceUrl) {
+    await setAgentResourceUrl(agentId, `https://${agentId}`);
+  }
+
+  const orgId = orgIdFromAgentOrn(targetOrn);
+  const authServerOrn = buildAuthorizationServerOrn(authServerId, orgId);
+  await connectAuthorizationServer(agentId, authServerOrn);
+
+  return { targetOrn, authServerOrn };
+}
+
+export async function createDelegationLink(callerOrn: string, targetOrn: string, authServerOrn: string): Promise<void> {
+  // Newly-connected authorization servers (connectAuthorizationServer) can take a moment to
+  // propagate before delegation-links accepts them — retry briefly on that specific validation error.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await sswsFetch('/workload-principals/api/v1/delegation-links', {
+      method: 'POST',
+      body: JSON.stringify({
+        from: { type: 'OKTA_AUTHORIZATION_SERVER', clientOrn: callerOrn, tokenType: 'ACCESS_TOKEN' },
+        to: { resourceOrn: targetOrn, authorizationServerOrn: authServerOrn },
+      }),
+    });
+    if (res.ok) return;
+
+    const err = await res.json() as any;
+    // Already linked — treat as success so callers (e.g. the reciprocal auto-link from
+    // ensureAgentConnection) can call this unconditionally without needing to check first.
+    const alreadyExists = err.errorCauses?.some((c: any) => c.reason === 'UNIQUE_CONSTRAINT');
+    if (alreadyExists) return;
+
+    const isPropagationDelay = err.errorCauses?.some((c: any) => c.location === 'to.authorizationServerOrn');
+    if (isPropagationDelay && attempt < 4) {
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+      continue;
+    }
+    throw new Error(err.errorSummary || `createDelegationLink ${res.status}`);
+  }
+}
+
+export interface DelegationLink { id: string; callerOrn: string; authorizationServerOrn: string; }
+
+export async function listDelegationLinksTo(targetOrn: string): Promise<DelegationLink[]> {
+  const filter = encodeURIComponent(`to.resourceOrn eq "${targetOrn}"`);
+  const res = await sswsFetch(`/workload-principals/api/v1/delegation-links?filter=${filter}&limit=20`);
+  if (!res.ok) throw new Error(`listDelegationLinksTo ${res.status}: ${await res.text()}`);
+  const data = await res.json() as { data: any[] };
+  return (data.data || []).map((d) => ({
+    id: d.id,
+    callerOrn: d.from?.clientOrn || '',
+    authorizationServerOrn: d.to?.authorizationServerOrn || '',
+  }));
+}
+
+export interface DelegationLinkFrom { id: string; targetOrn: string; authorizationServerOrn: string; }
+
+// Reverse lookup: given a caller's ORN, which targets is it authorized to call? Used by the
+// Exercise page's caller-first flow (pick the caller agent, then only show targets it can reach).
+export async function listDelegationLinksFrom(callerOrn: string): Promise<DelegationLinkFrom[]> {
+  const filter = encodeURIComponent(`from.clientOrn eq "${callerOrn}"`);
+  const res = await sswsFetch(`/workload-principals/api/v1/delegation-links?filter=${filter}&limit=20`);
+  if (!res.ok) throw new Error(`listDelegationLinksFrom ${res.status}: ${await res.text()}`);
+  const data = await res.json() as { data: any[] };
+  return (data.data || []).map((d) => ({
+    id: d.id,
+    targetOrn: d.to?.resourceOrn || '',
+    authorizationServerOrn: d.to?.authorizationServerOrn || '',
+  }));
+}
+
+// Auto-creates the reciprocal resource connection for a caller→target Machine Access
+// authorization, matching the real Okta Admin Console's behavior of keeping the delegation link
+// and the resource connection in sync in both directions. Posted directly (rather than through
+// createAgentConnection) so the structured errorCauses survive intact — needed to treat an
+// already-connected pairing as a no-op rather than an error.
+// NOTE: this body shape (and the a2a connectionType in general) is unverified against our live
+// tenant — our own createAgentConnection's IDENTITY_ASSERTION_A2A_SERVER branch uses a different
+// shape, and an earlier stashed WIP found A2A connections rejected by Okta entirely. Verify live
+// before relying on this; adjust the body shape if Okta rejects it.
+export async function ensureAgentConnection(callerAgentId: string, targetOrn: string, authServerOrn: string): Promise<void> {
+  const targetAgentId = targetOrn.split(':').pop();
+  if (!targetAgentId) throw new Error('Could not resolve target agent id from ORN');
+  const orgId = orgIdFromAgentOrn(targetOrn);
+  const targetResourceOrn = buildA2AResourceOrn(targetAgentId, orgId);
+
+  const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${callerAgentId}/connections`, {
+    method: 'POST',
+    body: JSON.stringify({
+      connectionType: 'IDENTITY_ASSERTION_A2A_SERVER',
+      authorizationServer: { orn: authServerOrn },
+      resource: { orn: targetResourceOrn },
+      scopeCondition: 'ALL_SCOPES',
+      scopes: ['*'],
+    }),
+  });
+  if (res.ok) return;
+
+  const err = await res.json() as any;
+  const alreadyExists = err.errorCauses?.some((c: any) => c.reason === 'DUPLICATE_CONNECTION');
+  if (alreadyExists) return;
+  throw new Error(err.errorSummary || `ensureAgentConnection ${res.status}`);
+}
+
+// Prepares an agent's backing OIDC app for a real Exercise Agent test login: workload-principal-
+// backed apps reject token_endpoint_auth_method 'none' outright, so this forces client_secret_basic
+// instead and appends the given callback URL to its redirect_uris (appending, not overwriting, in
+// case an admin already configured others). Returns the app's real client_id and secret so the
+// backend can complete the code exchange server-side with Basic auth.
+// This app IS the agent's own native OAuth client for User-Access-enabled agents, so forcing
+// client_secret_basic here would silently downgrade a private_key_jwt agent's real production
+// credential — only forced when the app isn't already on private_key_jwt; when it is, that's
+// preserved (Okta requires jwks be present on any PUT while private_key_jwt is set).
+export async function setAppAuthMethodAndRedirect(appId: string, redirectUri: string): Promise<{ clientId: string; clientSecret?: string; authMethod: string }> {
+  const getRes = await sswsFetch(`/api/v1/apps/${appId}`);
+  if (!getRes.ok) throw new Error(`getApp ${getRes.status}`);
+  const app = await getRes.json() as any;
+
+  app.credentials = app.credentials || {};
+  app.credentials.oauthClient = app.credentials.oauthClient || {};
+  const currentAuthMethod = app.credentials.oauthClient.token_endpoint_auth_method;
+
+  app.settings = app.settings || {};
+  app.settings.oauthClient = app.settings.oauthClient || {};
+
+  if (currentAuthMethod === 'private_key_jwt') {
+    const jwksRes = await sswsFetch(`/api/v1/apps/${appId}/credentials/jwks`);
+    if (jwksRes.ok) {
+      const { keys } = await jwksRes.json() as any;
+      app.settings.oauthClient.jwks = { keys: keys.map((k: any) => ({ kty: k.kty, kid: k.kid, use: k.use, alg: k.alg, e: k.e, n: k.n })) };
+    }
+  } else {
+    app.credentials.oauthClient.token_endpoint_auth_method = 'client_secret_basic';
+    delete app.credentials.oauthClient.pkce_required;
+  }
+
+  const existingRedirects: string[] = app.settings.oauthClient.redirect_uris || [];
+  if (!existingRedirects.includes(redirectUri)) {
+    app.settings.oauthClient.redirect_uris = [...existingRedirects, redirectUri];
+  }
+  // Workload-principal-backed OAuth clients require token-exchange and jwt-bearer to stay in
+  // grant_types (Okta rejects a PUT that drops them) — append authorization_code, don't replace.
+  const existingResponseTypes: string[] = app.settings.oauthClient.response_types || [];
+  if (!existingResponseTypes.includes('code')) {
+    app.settings.oauthClient.response_types = [...existingResponseTypes, 'code'];
+  }
+  const existingGrantTypes: string[] = app.settings.oauthClient.grant_types || [];
+  if (!existingGrantTypes.includes('authorization_code')) {
+    app.settings.oauthClient.grant_types = [...existingGrantTypes, 'authorization_code'];
+  }
+
+  const putRes = await sswsFetch(`/api/v1/apps/${appId}`, { method: 'PUT', body: JSON.stringify(app) });
+  if (!putRes.ok) {
+    const err = await putRes.json() as any;
+    const causes = (err.errorCauses || []).map((c: any) => c.errorSummary).join('; ');
+    throw new Error(causes || err.errorSummary || `setAppAuthMethodAndRedirect ${putRes.status}`);
+  }
+  const updated = await putRes.json() as any;
+  return {
+    clientId: updated.credentials?.oauthClient?.client_id || appId,
+    clientSecret: updated.credentials?.oauthClient?.client_secret,
+    authMethod: updated.credentials?.oauthClient?.token_endpoint_auth_method,
+  };
+}
+
+// ── Exercise Agent: real 3-step delegation chain made against onboarded agents ────────────────
+// Unlike sswsFetch, these authenticate with the service client's or the caller agent's own
+// credentials (not the backend's OKTA_API_TOKEN) against a custom authorization server's token
+// endpoint. Still emitted on the event bus so they show up in API Events.
+
+export function decodeJwt(token: string): { header: any; payload: any } {
+  const [headerB64, payloadB64] = token.split('.');
+  const decode = (b64: string) => JSON.parse(Buffer.from(b64.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+  return { header: decode(headerB64), payload: decode(payloadB64) };
+}
+
+export interface ExerciseTokenResult {
+  ok: boolean;
+  status: number;
+  accessToken?: string;
+  decoded?: { header: any; payload: any };
+  raw: any;
+  request?: { tokenEndpoint: string; body: any };
+}
+
+// Generic client assertion signer, parameterized by an arbitrary key/kid/clientId so it can sign
+// on behalf of any exercised agent using a stored test private key.
+async function signAssertion(clientId: string, privateKeyPem: string, kid: string, audience: string): Promise<string> {
+  const privateKey = await importPKCS8(privateKeyPem, 'RS256');
+  return new SignJWT({})
+    .setProtectedHeader({ alg: 'RS256', kid })
+    .setIssuer(clientId)
+    .setSubject(clientId)
+    .setAudience(audience)
+    .setJti(randomUUID())
+    .setIssuedAt()
+    .setExpirationTime('5m')
+    .sign(privateKey);
+}
+
+export interface AgentTestCredential {
+  clientSecret?: string;
+  privateKeyPem?: string;
+  privateKeyKid?: string;
+}
+
+// Shared low-level POST to a token endpoint, authenticating either via Basic auth (client_secret)
+// or a signed client_assertion (private_key_jwt) depending on which credential is supplied.
+// Emits on the event bus so every hop of the chain shows up in the Okta API Events panel.
+export async function postToken(
+  tokenEndpoint: string, clientId: string, cred: AgentTestCredential, params: Record<string, string>, label: string
+): Promise<ExerciseTokenResult> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' };
+  const body: Record<string, string> = { ...params };
+
+  if (cred.privateKeyPem && cred.privateKeyKid) {
+    body.client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+    body.client_assertion = await signAssertion(clientId, cred.privateKeyPem, cred.privateKeyKid, tokenEndpoint);
+  } else if (cred.clientSecret) {
+    headers.Authorization = `Basic ${Buffer.from(`${clientId}:${cred.clientSecret}`).toString('base64')}`;
+  }
+
+  const eventId = nextId();
+  const startMs = Date.now();
+  eventBus.emit('okta:call', { id: eventId, ts: new Date().toISOString(), method: 'POST', path: tokenEndpoint, label, requestBody: maskSecrets(body) });
+
+  const res = await fetch(tokenEndpoint, { method: 'POST', headers, body: new URLSearchParams(body) });
+  const text = await res.text();
+  let responseBody: any;
+  try { responseBody = JSON.parse(text); } catch { responseBody = text; }
+
+  eventBus.emit('okta:response', {
+    id: eventId, ts: new Date().toISOString(), method: 'POST', path: tokenEndpoint, label,
+    requestBody: maskSecrets(body), responseBody: maskSecrets(responseBody), status: res.status, durationMs: Date.now() - startMs,
+  });
+
+  const request = { tokenEndpoint, body: maskSecrets(body) };
+  if (!res.ok) return { ok: false, status: res.status, raw: responseBody, request };
+  const accessToken = responseBody.access_token;
+  return { ok: true, status: res.status, accessToken, decoded: accessToken ? decodeJwt(accessToken) : undefined, raw: maskSecrets(responseBody), request };
+}
+
+// Step 1: the configured service client originates the chain with a plain client_credentials grant.
+export async function runServiceClientGrant(
+  tokenEndpoint: string, serviceClientId: string, serviceClientSecret: string, resource: string
+): Promise<ExerciseTokenResult> {
+  return postToken(
+    tokenEndpoint, serviceClientId, { clientSecret: serviceClientSecret },
+    { grant_type: 'client_credentials', scope: 'agent.invoke', resource },
+    'Exercise: Service Client Grant'
+  );
+}
+
+// Step 2: the caller agent exchanges the service client's access token for an id-jag, authenticating
+// with whichever credential is actually configured for it. This hop targets the ORG-LEVEL default
+// token endpoint (not the custom authorization server's own endpoint) and requires an explicit
+// `audience` naming that authorization server's issuer. `resource` is required for an A2A hop
+// (identifies the target agent) but must be OMITTED for a plain Custom Authorization Server hop.
+export async function runIdJagExchange(
+  orgTokenEndpoint: string, callerAgentId: string, callerCred: AgentTestCredential, subjectToken: string, resource: string | undefined, audience: string,
+  subjectTokenType: string = 'urn:ietf:params:oauth:token-type:access_token',
+  scope: string = 'agent.invoke'
+): Promise<ExerciseTokenResult> {
+  const params: Record<string, string> = {
+    grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+    subject_token: subjectToken,
+    subject_token_type: subjectTokenType,
+    requested_token_type: 'urn:ietf:params:oauth:token-type:id-jag',
+    audience,
+    scope,
+  };
+  if (resource) params.resource = resource;
+  return postToken(orgTokenEndpoint, callerAgentId, callerCred, params, 'Exercise: Token Exchange (id-jag)');
+}
+
+// Step 3: the caller agent redeems the id-jag for the final delegated access token via a JWT-bearer
+// grant, authenticating the same way it did for the exchange in step 2.
+export async function runJwtBearerRedemption(
+  tokenEndpoint: string, callerAgentId: string, callerCred: AgentTestCredential, idJag: string
+): Promise<ExerciseTokenResult> {
+  return postToken(
+    tokenEndpoint, callerAgentId, callerCred,
+    { grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: idJag },
+    'Exercise: JWT Bearer Redemption'
+  );
 }
 
 // ── System Log (Logging page) ──────────────────────────────────────────────────
