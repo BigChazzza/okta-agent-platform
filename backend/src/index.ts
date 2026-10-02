@@ -8,6 +8,8 @@ import connectionsRouter from './routes/connections';
 import loggingRouter from './routes/logging';
 import exerciseRouter from './routes/exercise';
 import appsRouter from './routes/apps';
+import chatRouter from './routes/chat';
+import mcpCampaignsRouter from './routes/mcpCampaigns';
 import { eventBus, OktaApiEvent } from './services/eventBus';
 import { migrate, seedResources } from './db/client';
 
@@ -71,6 +73,8 @@ app.use('/api/resources', resourcesRouter);
 app.use('/api/logging', loggingRouter);
 app.use('/api/exercise', exerciseRouter);
 app.use('/api/apps', appsRouter);
+app.use('/api/chat', chatRouter);
+app.use('/mcp/campaigns', mcpCampaignsRouter);
 
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);

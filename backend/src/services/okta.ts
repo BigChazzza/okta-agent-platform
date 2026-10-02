@@ -104,9 +104,18 @@ export async function getUser(userId: string): Promise<OktaUser> {
 
 export interface OktaAIAgent {
   id: string; platform: string; status: string; appId?: string;
+  oauthClient?: { clientId: string };
   profile: { name: string; description?: string };
   created?: string; lastUpdated?: string; _links?: any;
   signOnProvider?: { type?: string; appInstanceId?: string };
+}
+
+// appId is set both for agents that are genuinely app-backed AND for agents migrated from a
+// pre-agents version of Okta, where it's a stale pointer to the pre-migration app — the agent's
+// real, current credential config lives on its native oauthClient instead, which is always
+// authoritative when present.
+export function isAppBackedAgent(oktaAgent: Pick<OktaAIAgent, 'appId' | 'oauthClient'>): boolean {
+  return !!oktaAgent.appId && !oktaAgent.oauthClient?.clientId;
 }
 
 async function pollOperation(opUrl: string, maxAttempts = 15): Promise<string> {
@@ -914,6 +923,92 @@ export async function runJwtBearerRedemption(
     { grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: idJag },
     'Exercise: JWT Bearer Redemption'
   );
+}
+
+// Forces an app-backed agent's backing app onto client_secret_basic and returns a freshly
+// generated secret — PUT-ing a changed token_endpoint_auth_method returns a fresh client_secret
+// directly in the same response.
+export async function rotateAppSecret(appId: string): Promise<{ clientId: string; clientSecret: string }> {
+  const getRes = await sswsFetch(`/api/v1/apps/${appId}`);
+  if (!getRes.ok) throw new Error(`getApp ${getRes.status}`);
+  const app = await getRes.json() as any;
+
+  app.credentials = app.credentials || {};
+  app.credentials.oauthClient = app.credentials.oauthClient || {};
+  app.credentials.oauthClient.token_endpoint_auth_method = 'client_secret_basic';
+  delete app.credentials.oauthClient.pkce_required;
+
+  const putRes = await sswsFetch(`/api/v1/apps/${appId}`, { method: 'PUT', body: JSON.stringify(app) });
+  if (!putRes.ok) {
+    const err = await putRes.json() as any;
+    const causes = (err.errorCauses || []).map((c: any) => c.errorSummary).join('; ');
+    throw new Error(causes || err.errorSummary || `rotateAppSecret ${putRes.status}`);
+  }
+  const updated = await putRes.json() as any;
+  return {
+    clientId: updated.credentials?.oauthClient?.client_id || appId,
+    clientSecret: updated.credentials?.oauthClient?.client_secret,
+  };
+}
+
+export interface AgentSecret { id: string; status: string; created: string; }
+
+export async function listAgentSecrets(agentId: string): Promise<AgentSecret[]> {
+  const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/credentials/secrets`);
+  if (!res.ok) throw new Error(`listAgentSecrets ${res.status}: ${await res.text()}`);
+  const data = await res.json() as any[];
+  return (data || []).map((s) => ({ id: s.id, status: s.status, created: s.created }));
+}
+
+// Mints a secret for a NATIVE (non-app-backed) agent's own oauthClient. Okta's agent-credentials
+// POST only returns a secret when the client is already on client_secret_basic — a client left on
+// its default auth method needs that flipped first via a PUT to the plain OAuth client endpoint,
+// which (confirmed live) returns a fresh client_secret directly in that same response, the same
+// way rotateAppSecret's PUT does for app-backed agents.
+export async function createAgentSecret(agentId: string): Promise<{ id: string; clientSecret: string; status: string }> {
+  const clientRes = await sswsFetch(`/oauth2/v1/clients/${agentId}`);
+  if (!clientRes.ok) throw new Error(`getClient ${clientRes.status}: ${await clientRes.text()}`);
+  const client = await clientRes.json() as any;
+
+  if (client.token_endpoint_auth_method !== 'client_secret_basic') {
+    const putRes = await sswsFetch(`/oauth2/v1/clients/${agentId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ ...client, token_endpoint_auth_method: 'client_secret_basic' }),
+    });
+    if (!putRes.ok) throw new Error(`switchClientAuthMethod ${putRes.status}: ${await putRes.text()}`);
+    const updated = await putRes.json() as any;
+    // Okta only includes client_secret in the PUT response when the auth method actually
+    // changes — fall through to the POST-a-secret branch below if it was already basic.
+    if (updated.client_secret) return { id: agentId, clientSecret: updated.client_secret, status: 'ACTIVE' };
+  }
+
+  const res = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/credentials/secrets`, {
+    method: 'POST', body: JSON.stringify({}),
+  });
+  if (res.ok) {
+    const data = await res.json() as any;
+    return { id: data.id, clientSecret: data.client_secret, status: data.status };
+  }
+
+  // Okta caps the number of secrets per client — recover by retiring the oldest ACTIVE secret
+  // (deactivate is required before delete) and retrying once, rather than leaving the caller stuck.
+  const errText = await res.text();
+  if (res.status === 400 && errText.includes('maximum number of client secrets')) {
+    const existing = await listAgentSecrets(agentId);
+    const oldest = existing.filter((s) => s.status === 'ACTIVE').sort((a, b) => a.created.localeCompare(b.created))[0];
+    if (oldest) {
+      await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/credentials/secrets/${oldest.id}/lifecycle/deactivate`, { method: 'POST' });
+      await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/credentials/secrets/${oldest.id}`, { method: 'DELETE' });
+      const retryRes = await sswsFetch(`/workload-principals/api/v1/ai-agents/${agentId}/credentials/secrets`, {
+        method: 'POST', body: JSON.stringify({}),
+      });
+      if (retryRes.ok) {
+        const data = await retryRes.json() as any;
+        return { id: data.id, clientSecret: data.client_secret, status: data.status };
+      }
+    }
+  }
+  throw new Error(`createAgentSecret ${res.status}: ${errText}`);
 }
 
 // ── System Log (Logging page) ──────────────────────────────────────────────────

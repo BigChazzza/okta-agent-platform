@@ -77,6 +77,17 @@ export async function migrate() {
       assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (agent_id, resource_id)
     );
+    CREATE TABLE IF NOT EXISTS campaigns (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      budget NUMERIC,
+      start_date TIMESTAMPTZ,
+      end_date TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 }
 
